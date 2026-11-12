@@ -13319,25 +13319,29 @@ function crowdUpdate(dt, t, beat) {
     burst = R.burst && t < R.burst.until ? R.burst : null;
   CROWD.me.copy(SC.camera ? SC.camera.position : V3(0, 2.4, 1));
   if (FIGHT.on) {
-    const age = t - FIGHT.t0, rush = smooth01(age / 2.1);
+    const age = t - FIGHT.t0, shocked = age < 1.05;
+    const rush = smooth01(Math.max(0, age - 1.05) / 2.1);
     for (const m of CROWD.list) {
       const p = m.p; if (!p.root.visible) continue;
-      if (!m.fightFace) { p.express("angry", 0); m.fightFace = true; }
+      const mood = shocked ? 'shock' : 'angry';
+      if (m.fightFace !== mood) { p.express(shocked ? 'jawdrop' : 'angry', 0); m.fightFace = mood; }
       const start = m.fightStart || (m.fightStart = p.root.position.clone());
       const spread = (m.wild - 0.5) * 0.8;
       const target = V3(CROWD.me.x + spread, 0, CROWD.me.z + 0.45 + (m.wild * 0.7));
-      p.root.position.lerpVectors(start, target, rush);
+      if (!shocked) p.root.position.lerpVectors(start, target, rush);
       p.root.rotation.y += (Math.atan2(CROWD.me.x - p.root.position.x, CROWD.me.z - p.root.position.z) - p.root.rotation.y) * Math.min(1, dt * 2);
-      p.c.stand = 1; p.c.lean = 0.28 + rush * 0.22; p.c.headTilt = Math.sin(t * 9 + m.phase0) * 0.12;
-      p.c.headShake = Math.sin(t * 18 + m.phase0) * 0.16; p.c.step = 0.5 + rush * 0.5; p.c.look.copy(CROWD.me);
+      p.c.stand = 1; p.c.lean = shocked ? 0 : 0.28 + rush * 0.22;
+      p.c.headTilt = shocked ? 0 : Math.sin(t * 9 + m.phase0) * 0.12;
+      p.c.headShake = shocked ? 0 : Math.sin(t * 18 + m.phase0) * 0.16;
+      p.c.step = shocked ? 0 : 0.5 + rush * 0.5; p.c.look.copy(CROWD.me);
       p.update(Math.min(dt, .1), t, beat);
     }
-    if (!FIGHT.gameOver && t > FIGHT.booUntil && AE.decoded && AE.ctx) {
+    if (!shocked && !FIGHT.gameOver && t > FIGHT.booUntil && AE.decoded && AE.ctx) {
       FIGHT.booUntil = t + 1.5; const now = AE.ctx.currentTime;
       for (let i = 0; i < 5; i++) voiceBlip(now + rand(0, .8), { dur:rand(.45,.8), f0:rand(115,205), fem:false, v0:VOWEL.u, v1:VOWEL.u, vol:rand(.07,.14), att:.07, hold:.7, curve:[[0,1.05],[.28,.94],[1,.72]], rough:.18, pan:rand(-.9,.9) });
     }
     aimCamera();
-    if (age > 4.4 && !FIGHT.gameOver) {
+    if (age > 5.0 && !FIGHT.gameOver) {
       FIGHT.gameOver = true;
       document.getElementById("gameOver").classList.remove("hide");
     }
@@ -18377,20 +18381,20 @@ function fightStart() {
   TP.blowing = false; TP.voice = null; MUS.running = false;
   if (AE.ctx) stopBandVoices(AE.ctx.currentTime);
   if (ITL.cur) itlEnd();
-  for (const id of ["fight", "endShow", "nextSong", "pause", "hudMode", "autoMode", "special"]) {
-    const el = document.getElementById(id);
-    if(el) el.style.display="none";
-  }
+  for (const id of ["fight","endShow","nextSong","pause","hudMode","autoMode","special","finishHint","finBar"]) { const el=document.getElementById(id); if(el) el.style.display="none"; }
   document.getElementById("controls").classList.add("off");
   REACT.burst = null; setBed("applause", 0); setBed("babble", 0);
   for (const m of CROWD.list) {
     m.fightStart = m.p.root.position.clone();
-    m.fightFace = false;
+    m.fightFace = 'shock';
     m.act = null;
     m.pending = null;
-    m.p.express("angry", 0);
-    m.fightFace = true;
+    m.p.express('jawdrop', 1.15);
+    m.p.c.stand = 1;
+    m.p.c.step = 0;
+    m.p.c.lean = 0;
   }
+  for (const m of BAND.members) stare(m, 4.8, 'jawdrop', 0.9);
   aimCamera();
 }
 
@@ -18472,9 +18476,9 @@ function finUI() {
   show(E.nextSong, play && !FIN.req && !FIGHT.on);
   show(E.endShow, play && !FIN.req && !FIGHT.on);
   show(E.fight, play && !FIN.req && !FIN.on && !FIGHT.on);
-  show(E.hudMode, play);
-  show(E.special, play, 'block');
-  if (GAME.phase !== 'pre' && GAME.phase !== 'title') E.controls.classList.toggle('off', fin);
+  show(E.hudMode, play && !FIGHT.on);
+  show(E.special, play && !FIGHT.on, 'block');
+  if (GAME.phase !== 'pre' && GAME.phase !== 'title') E.controls.classList.toggle('off', fin || FIGHT.on);
   show(E.finBar, fin && FIN.stage === 'sign', 'flex');
 }
 
@@ -20317,7 +20321,36 @@ function setupMe() {
   hold.add(horn);
   setupHorn2(mats);
   setupMouthpieceRig(mats);
+  setupFightHand();
   placeMe();
+}
+// Fight 전용 1인칭 제스처.
+function setupFightHand() {
+  const g = ME.fightHand = new THREE.Group();
+  SC.vmScene.add(g);
+  const skin = toonMat('#f1b892'), sleeve = toonMat('#d23b4f'), cuff = toonMat('#fff6e6');
+  const ball = (x, y, z, sx, sy, sz, mat = skin) => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mat);
+    m.position.set(x, y, z); m.scale.set(sx, sy, sz); g.add(m);
+  };
+  const seg = (a, b, r = 0.018, mat = skin) => g.add(capsuleBetween(V3(...a), V3(...b), r, mat));
+  seg([0.10, -0.31, 0.02], [-0.015, -0.07, 0.015], 0.047, sleeve);
+  seg([0.015, -0.11, 0.005], [-0.01, -0.055, 0.005], 0.045, cuff);
+  ball(0, 0.005, 0, 0.087, 0.105, 0.035);
+  // The middle finger stays raised while the other fingers curl into a fist.
+  seg([-0.008, 0.066, -0.002], [-0.009, 0.15, -0.012], 0.021);
+  seg([-0.009, 0.15, -0.012], [-0.01, 0.245, -0.02], 0.018);
+  ball(-0.01, 0.244, -0.02, 0.018, 0.02, 0.017);
+  for (const x of [-0.052, 0.032, 0.061]) {
+    const y = x > 0.05 ? 0.045 : 0.055;
+    seg([x, y, -0.002], [x * 1.02, y - 0.035, -0.025], 0.017);
+    seg([x * 1.02, y - 0.035, -0.025], [x * 0.72, y - 0.052, -0.035], 0.016);
+    ball(x * 0.72, y - 0.052, -0.035, 0.016, 0.016, 0.014);
+  }
+  seg([0.069, -0.005, -0.002], [0.078, 0.038, -0.025], 0.021);
+  seg([0.078, 0.038, -0.025], [0.031, 0.029, -0.045], 0.019);
+  ball(0.031, 0.029, -0.045, 0.019, 0.018, 0.014);
+  g.visible = false;
 }
 // 두 번째 트럼펫: 왼손에 드는 거울상 (밸브를 왼손 손가락으로 누름)
 function setupHorn2(mats) {
@@ -20576,6 +20609,21 @@ function updateMe(dt, t) {
     if (k > 0.97) ME.hold.visible = false;
     if (ME.hold2) ME.hold2.visible = false;
   }
+  if (FIGHT.on && ME.fightHand) {
+    const age = Math.max(0, t - FIGHT.t0);
+    const d = 0.62, hy = Math.tan(SC.vmCam.fov * Math.PI / 360) * d;
+    const hx = hy * SC.vmCam.aspect;
+    const enter = smooth01(age / 0.45);
+    ME.fightHand.visible = true;
+    ME.hold.visible = false;
+    if (ME.hold2) ME.hold2.visible = false;
+    if (ME.mpRig) ME.mpRig.visible = false;
+    ME.fightHand.position.set(hx * 0.22 + (1 - enter) * hx * 0.75, -hy * 0.02 - (1 - enter) * hy * 1.1, -d);
+    ME.fightHand.scale.setScalar(0.78);
+    ME.fightHand.rotation.set(0, 0, -0.16);
+  } else if (ME.fightHand) {
+    ME.fightHand.visible = false;
+  }
   if (ME.mpRig) {
     ME.mpRig.visible = ik < 0.6;
     if (ME.mpRig.visible) {
@@ -20688,7 +20736,9 @@ function aimCamera() {
   }
   if (FIGHT.on) {
     const fall = smooth01((NOW.t - FIGHT.t0 - 1.55) / 1.45);
-    FIGHT.fall = fall; SC.camera.position.y -= fall * 1.28; SC.camera.position.z += fall * 0.35;
+    FIGHT.fall = fall;
+    SC.camera.position.y -= fall * 1.28;
+    SC.camera.position.z += fall * 0.35;
     SC.camera.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(fall * 0.32, 0, -fall * 1.22, "XYZ")));
   }
 }
