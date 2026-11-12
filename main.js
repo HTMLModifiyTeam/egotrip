@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
+import JAZZ_AUDIO from './js/data/audio.js';
+import TUNES from './js/data/tunes.js';
 
 // ===== 00_util.js =====
 // ===================== 공용 도구 =====================
@@ -91,8 +93,7 @@ const STYLE = {
 };
 
 function makeGradient(stops) {
-  const n = stops.length,
-    data = new Uint8Array(n * 4);
+  const n = stops.length, data = new Uint8Array(n * 4);
   for (let i = 0; i < n; i++) {
     const v = Math.round(clamp(stops[i], 0, 1) * 255);
     data[i * 4] = v;
@@ -100,9 +101,8 @@ function makeGradient(stops) {
     data[i * 4 + 2] = v;
     data[i * 4 + 3] = 255;
   }
-  const t = new THREE.DataTexture(data, n, 1, THREE.RGBAFormat);
-  t.minFilter = THREE.NearestFilter;
-  t.magFilter = THREE.NearestFilter;
+  const t = new THREE.DataTexture(data, n);
+  t.minFilter = t.magFilter = THREE.NearestFilter;
   t.generateMipmaps = false;
   t.needsUpdate = true;
   return t;
@@ -777,26 +777,10 @@ function synthRoomTone(ctx) {
   return toBuf(ctx, a.subarray(0, n - xf), 0.5, b.subarray(0, n - xf));
 }
 
-function b64ToAB(s) {
-  const bin = atob(s),
-    u = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-  return u.buffer;
-}
-
-function decodeAB(ctx, ab) {
-  return new Promise((res, rej) => {
-    const p = ctx.decodeAudioData(ab, res, rej);
-    if (p && p.then) p.then(res, rej);
-  });
-}
-
 function createAudio() {
   if (AE.ctx) return AE.ctx;
   const AC = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AC({
-    latencyHint: 'interactive'
-  });
+  const ctx = new AC({ latencyHint: 'interactive' });
   AE.ctx = ctx;
   const glue = ctx.createDynamicsCompressor();
   glue.threshold.value = -16;
@@ -939,7 +923,7 @@ function synthBegin(onStart) {
       clearTimeout(timer);
       try {
         if (w) w.terminate();
-      } catch (e) {}
+      } catch {}
       local().then(resolve);
     };
     // 무대를 다 만들고 4초가 지나도록 워커가 뜨지도 않았으면(소식 없음) 기다리지 않고 본 화면에서 만듦
@@ -947,10 +931,7 @@ function synthBegin(onStart) {
       if (!alive) fallback();
     }, 4000);
     try {
-      if (/noworker/.test(location.search)) throw new Error('noworker'); // 시험용: 워커 없이
-      w = new Worker(URL.createObjectURL(new Blob([synthWorkerSrc()], {
-        type: 'text/javascript'
-      })));
+      w = new Worker(URL.createObjectURL(new Blob([synthWorkerSrc()], { type: 'text/javascript' })));
       w.onmessage = e => {
         if (e.data === 1) {
           alive = true;
@@ -1010,16 +991,26 @@ const T_TUNE = {
   T85: 11.4,
   T88: -11.8
 };
+
+const AUDIO_DIR = 'audio/';
+const AUDIO_EXT = '.mp3'; // change to match your files (.ogg, .wav, .m4a ...)
+
+async function loadAB(key) {
+  const res = await fetch(`${AUDIO_DIR}${encodeURIComponent(key)}${AUDIO_EXT}`);
+  if (!res.ok) throw new Error(`소리 파일을 못 불러왔습니다: ${key} (${res.status})`);
+  return res.arrayBuffer();
+}
+
 async function decodePack(onProgress) {
-  const ctx = createAudio(),
-    P = window.JAZZ_AUDIO;
-  if (!P) throw new Error('소리 묶음을 못 불러왔습니다');
-  const keys = Object.keys(P.meta);
+  const ctx = createAudio(), P = JAZZ_AUDIO;
+  if (!P || !Array.isArray(P.data)) throw new Error('소리 묶음을 못 불러왔습니다');
+  const keys = P.data;
   let done = 0;
   const sets = {};
   const worker = async (key) => {
     const meta = P.meta[key];
-    const buf = await decodeAB(ctx, b64ToAB(P.data[key]));
+    if (!meta) throw new Error(`meta 정보가 없습니다: ${key}`);
+    const buf = await ctx.decodeAudioData(await loadAB(key));
     const sr = buf.sampleRate,
       d0 = buf.getChannelData(0),
       lim = Math.min(d0.length, Math.floor(0.06 * sr));
@@ -1064,13 +1055,12 @@ async function decodePack(onProgress) {
     done++;
     onProgress && onProgress(done / keys.length);
   };
-  // 전부 한꺼번에 맡김: 푸는 일 자체는 브라우저가 다른 스레드에서 하므로 무대를 만드는 동안 같이 진행됨
+  // 전부 한꺼번에 불러오고 푼다 (네트워크 + 디코딩이 병렬로 진행됨)
   await Promise.all(keys.map(worker));
   for (const k in sets)
     if (Array.isArray(sets[k])) sets[k].sort((a, b) => a.m - b.m || a.rr - b.rr);
   AE.sets = sets;
-  (AE.at || (AE.at = {})).sets = performance.now(); // 불러오기 시각 기록 (점검용)
-  // 합성 소리·잔향 (맨 처음부터 따로 만들고 있던 것을 여기서 받음)
+  (AE.at || (AE.at = {})).sets = performance.now();
   Object.assign(AE.syn, await synthBegin());
   AE.rev.buffer = AE.syn.ir;
   const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate),
@@ -1079,9 +1069,6 @@ async function decodePack(onProgress) {
   AE.noise = nb;
   AE.decoded = true;
 }
-
-// 가장 가까운 샘플 (A세트는 라운드로빈)
-const RR = {};
 
 function nearestSample(set, midi, rr = 0) {
   const arr = AE.sets[set];
@@ -1105,11 +1092,7 @@ const bandVoices = new Set();
 function trackBandVoice(src, g, dest, lfo = null) {
   const b = AE.buses;
   if (dest !== b.tbn && dest !== b.pno && dest !== b.pnoSolo && dest !== b.bass && dest !== b.drums) return;
-  const voice = {
-    src,
-    g,
-    lfo
-  };
+  const voice = { src, g, lfo};
   bandVoices.add(voice);
   src.addEventListener('ended', () => bandVoices.delete(voice), {
     once: true
@@ -1117,12 +1100,7 @@ function trackBandVoice(src, g, dest, lfo = null) {
 }
 
 function stopBandVoices(now) {
-  for (const {
-      src,
-      g,
-      lfo
-    }
-    of bandVoices) {
+  for (const { src,  g,  lfo } of bandVoices) {
     const gain = g.gain;
     if (gain.cancelAndHoldAtTime) gain.cancelAndHoldAtTime(now);
     else {
@@ -1134,7 +1112,7 @@ function stopBandVoices(now) {
     try {
       src.stop(now + 0.05);
       if (lfo) lfo.stop(now + 0.05);
-    } catch (e) {}
+    } catch {}
   }
   bandVoices.clear();
 }
@@ -1277,10 +1255,10 @@ class SusVoice {
       this.ended = true;
       try {
         lfo.stop();
-      } catch (e) {}
+      } catch {}
       try {
         tail.disconnect(g);
-      } catch (e) {}
+      } catch {}
       src.disconnect();
       g.disconnect();
       lfo.disconnect();
@@ -1352,7 +1330,7 @@ class SusVoice {
       try {
         this.src.stop(this.t0);
         this.lfo.stop(this.t0 + 0.01);
-      } catch (e) {}
+      } catch {}
       return;
     }
     g.cancelScheduledValues(when);
@@ -1362,7 +1340,7 @@ class SusVoice {
     try {
       this.src.stop(when + time * 3 + 0.05);
       this.lfo.stop(when + time * 3 + 0.05);
-    } catch (e) {}
+    } catch {}
   }
 }
 
@@ -1383,10 +1361,10 @@ function cutVoice(v, when, fade = 0.012) {
   }
   try {
     v.src.stop(end);
-  } catch (e) {}
+  } catch {}
   if (v.lfo) try {
     v.lfo.stop(end);
-  } catch (e) {}
+  } catch {}
 }
 
 // 지속 배경음 (방 소리, 박수 바탕)
@@ -2145,7 +2123,7 @@ function makeBuzz(when) {
       g.gain.setTargetAtTime(0, t, 0.03);
       for (const n of [osc, jit, tr, ns]) try {
         n.stop(t + 0.2);
-      } catch (e) {}
+      } catch {}
     },
   };
 }
@@ -6613,486 +6591,6 @@ function randomLook(seed) {
   return L;
 }
 
-// ===== 40_tunes.js =====
-// ===================== 셋리스트: 15곡 (모두 새로 쓴 테마, 화성 진행만 표준) =====================
-// form: 한 코러스. '|' = 마디. 마디 안 화음 1개 = 4박, 2개 = 2박씩
-// mel: 음/박. r = 쉼표, ~ = 다음 마디 첫 음으로 이어짐, b: = 베이스가 연주
-// blues: 블루 노트(♭3, ♭5) 허용 표시 (검사 도구용)
-const TUNES = [{
-    id: 'f-blues',
-    title: '첫 잔',
-    key: 'F',
-    bpm: 132,
-    feel: 'swing',
-    sections: 'A12',
-    blues: true,
-    form: 'F7 | Bb7 | F7 | Cm7 F7 | Bb7 | Bdim7 | F7 | Am7 D7b9 | Gm7 | C7 | F7 D7b9 | Gm7 C7',
-    head: {
-      inst: 'tbn',
-      passes: 2,
-      mel: `
-      r/.5 C4/.5 Eb4/.5 F4/.5 Ab4/.5 F4/1 Eb4/.5 | D4/1.5 C4/.5 Bb3/1.2 r/.8 |
-      r/.5 C4/.5 Eb4/.5 F4/.5 Ab4/.5 F4/.5 Eb4/.5 C4/.5 | Bb3/1 C4/.5 Eb4/.5 A3/1.5 Ab3/.5 |
-      r/.5 C4/.5 Eb4/.5 F4/.5 Ab4/.5 F4/1 Eb4/.5 | D4/1.5 F4/.5 Ab4/1 F4/1 |
-      r/.5 C4/.5 Eb4/.5 F4/.5 Ab4/.5 F4/.5 Eb4/.5 C4/.5 | C4/1 A3/.5 C4/.5 F#4/1.5 Eb4/.5 |
-      D4/1 F4/.5 G4/.5 Bb4/.5 A4/.5 G4/.5 F4/.5 | E4/1 G4/.5 Bb4/.5 A4/1 G4/.5 E4/.5 |
-      F4/1.5 Eb4/.5 F#4/1 Eb4/.5 D4/.5 | D4/1 Bb3/1 E4/1 G4/1`
-    },
-    ending: 'tag',
-    solos: ['tbn', 'pno', 'bass'],
-    trades: false
-  },
-
-  {
-    id: 'autumn-g',
-    title: '늦가을',
-    key: 'G',
-    bpm: 168,
-    feel: 'swing',
-    sections: 'A8 A8 B8 C8',
-    form: `Cm7 | F7 | Bbmaj7 | Ebmaj7 | Am7b5 | D7b9 | Gm7 | Gm7 |
-           Cm7 | F7 | Bbmaj7 | Ebmaj7 | Am7b5 | D7b9 | Gm7 | Gm7 |
-           Am7b5 | D7b9 | Gm7 | Gm7 | Cm7 | F7 | Bbmaj7 | Ebmaj7 |
-           Am7b5 | D7b9 | Gm7 Gb7 | Fm7 E7 | Ebmaj7 | Am7b5 D7b9 | Gm7 | Gm7`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      r/.5 C4/.5 Eb4/.5 G4/.5 Bb4/.5 G4/.5 r/.5 A4/.5~ | A4/1.5 G4/.5 F4/.5 Eb4/.5 C4/1 |
-      r/.5 Bb3/.5 D4/.5 F4/.5 r/.5 A4/1 G4/.5~ | G4/2 F4/.5 Eb4/.5 D4/.5 Bb3/.5 |
-      r/.5 A3/.5 C4/.5 Eb4/.5 r/.5 G4/1 F#4/.5~ | F#4/1.5 Eb4/.5 D4/.5 C4/.5 A3/1 |
-      r/.5 Bb3/.5 D4/.5 F4/.5 A4/1 G4/1~ | G4/2 r/2 |
-      r/.5 C4/.5 Eb4/.5 G4/.5 Bb4/.5 G4/.5 Eb4/.5 A4/.5~ | A4/1 G4/.5 F4/.5 Eb4/1 C4/1 |
-      r/.5 Bb3/.5 D4/.5 F4/.5 r/.5 A4/1 G4/.5~ | G4/1.5 F4/.5 Eb4/1 r/1 |
-      r/.5 A3/.5 C4/.5 Eb4/.5 r/.5 G4/1 F#4/.5~ | F#4/1 A4/.5 F#4/.5 Eb4/1 C4/1 |
-      Bb3/1 r/.5 D4/.5 G4/2~ | G4/2 r/2 |
-      C4/1 Eb4/1 G4/2 | F#4/1.5 Eb4/.5 r/1 C4/1 |
-      Bb3/2 r/1 D4/.5 F4/.5 | A4/1 G4/.5 F4/.5 D4/1 r/1 |
-      r/.5 G4/.5 Bb4/.5 G4/.5 Eb4/1 D4/.5 C4/.5 | A3/1 C4/.5 Eb4/.5 r/.5 D4/1 C4/.5~ |
-      C4/1.5 D4/.5 F4/1 A4/1 | G4/2 r/2 |
-      r/.5 A3/.5 C4/.5 Eb4/.5 r/.5 G4/1 F#4/.5~ | F#4/1.5 Eb4/.5 D4/.5 C4/.5 A3/1 |
-      r/.5 Bb3/.5 D4/1 r/.5 Bb3/.5 Db4/1 | r/.5 Ab3/.5 C4/1 r/.5 G#3/.5 B3/1 |
-      Bb3/1 Eb4/.5 G4/.5 Bb4/1.5 A4/.5 | G4/1 Eb4/1 F#4/1 C4/1 |
-      D4/1.5 Bb3/.5 G3/2~ | G3/2 r/2`
-    },
-    ending: 'tag',
-    solos: ['pno', 'tbn', 'bass'],
-    trades: false
-  },
-
-  {
-    id: 'bossa-c',
-    title: '저녁 바람',
-    key: 'C',
-    bpm: 140,
-    feel: 'bossa',
-    sections: 'A16',
-    form: 'Cm7 | Cm7 | Fm7 | Fm7 | Dm7b5 | G7alt | Cm7 | Cm7 | Ebm7 | Ab7 | Dbmaj7 | Dbmaj7 | Dm7b5 | G7alt | Cm7 | Dm7b5 G7alt',
-    head: {
-      inst: 'pno',
-      passes: 2,
-      mel: `
-      G4/1.5 C5/1 Bb4/1.5~ | Bb4/2 G4/1 Eb4/1 |
-      C4/1.5 F4/1 Eb5/1.5~ | Eb5/2 C5/1 Ab4/1 |
-      r/.5 F4/1 Ab4/1 C5/1.5 | B4/1.5 Ab4/1 Eb4/1.5 |
-      D4/1.5 Eb4/2.5~ | Eb4/2 r/2 |
-      Bb4/1.5 Eb5/1 Db5/1.5 | C5/2 Gb4/1 Eb4/1 |
-      F4/1.5 Ab4/1 C5/1.5~ | C5/2 Bb4/1 Ab4/1 |
-      r/.5 F4/1 Ab4/1 C5/1.5 | B4/1.5 Ab4/1 F4/1.5 |
-      Eb4/1.5 D4/1 C4/1.5~ | C4/2 r/1.5 Ab4/.5`
-    },
-    ending: 'vampfade',
-    solos: ['pno', 'tbn'],
-    trades: false
-  },
-
-  {
-    id: 'rhythm-bb',
-    title: '빠른 걸음',
-    key: 'Bb',
-    bpm: 208,
-    feel: 'swing',
-    sections: 'A8 A8 B8 A8',
-    form: `Bb6 G7 | Cm7 F7 | Dm7 G7 | Cm7 F7 | Fm7 Bb7 | Eb7 Edim7 | Dm7 G7 | Cm7 F7 |
-           Bb6 G7 | Cm7 F7 | Dm7 G7 | Cm7 F7 | Fm7 Bb7 | Eb7 Edim7 | Dm7 G7 | Cm7 F7 |
-           D7 | D7 | G7 | G7 | C7 | C7 | F7 | F7 |
-           Bb6 G7 | Cm7 F7 | Dm7 G7 | Cm7 F7 | Fm7 Bb7 | Eb7 Edim7 | Cm7 F7 | Bb6`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      r/.5 D4/.5 F4/.5 G4/1 F4/.5 D4/.5 F4/.5~ | F4/1 D4/.5 C4/1 r/1.5 |
-      r/.5 D4/.5 F4/.5 G4/1 F4/.5 D4/.5 F4/.5~ | F4/1 D4/.5 C4/1 r/1.5 |
-      Ab4/.5 F4/.5 Eb4/.5 C4/.5 D4/.5 F4/.5 Ab4/.5 G4/.5~ | G4/1 Db4/1 E4/.5 G4/.5 Bb4/.5 G4/.5 |
-      F4/.5 A4/.5 F4/.5 D4/.5 B3/1 D4/.5 F4/.5 | Eb4/1 r/.5 C4/.5 A3/1 r/1 |
-      r/.5 D4/.5 F4/.5 G4/1 F4/.5 D4/.5 F4/.5~ | F4/1 D4/.5 C4/1 r/1.5 |
-      r/.5 D4/.5 F4/.5 G4/1 F4/.5 D4/.5 F4/.5~ | F4/1 D4/.5 C4/1 r/1.5 |
-      Ab4/.5 F4/.5 Eb4/.5 C4/.5 D4/.5 F4/.5 Ab4/.5 G4/.5~ | G4/1 Db4/1 E4/.5 G4/.5 Bb4/.5 G4/.5 |
-      F4/.5 A4/.5 F4/.5 D4/.5 B3/1 D4/.5 F4/.5 | Eb4/1 r/.5 C4/.5 A3/.5 C4/.5 Eb4/.5 F#4/.5~ |
-      F#4/2 r/.5 A4/1 F#4/.5 | E4/1 C4/1 r/1.5 F4/.5~ |
-      F4/1.5 E4/.5 D4/1 B3/1 | r/.5 D4/.5 F4/.5 Ab4/.5 G4/1 F4/1 |
-      E4/2 r/.5 G4/1 E4/.5 | D4/1 Bb3/1 r/1.5 Eb4/.5~ |
-      Eb4/1.5 D4/.5 C4/1 A3/1 | r/.5 C4/.5 Eb4/.5 E4/.5 F4/1 Eb4/.5 C4/.5 |
-      r/.5 D4/.5 F4/.5 G4/1 F4/.5 D4/.5 F4/.5~ | F4/1 D4/.5 C4/1 r/1.5 |
-      r/.5 D4/.5 F4/.5 G4/1 F4/.5 D4/.5 F4/.5~ | F4/1 D4/.5 C4/1 r/1.5 |
-      Ab4/.5 F4/.5 Eb4/.5 C4/.5 D4/.5 F4/.5 Ab4/.5 G4/.5~ | G4/1 Db4/1 E4/.5 G4/.5 Bb4/.5 G4/.5 |
-      C4/.5 Eb4/.5 G4/.5 Bb4/.5 A4/.5 F4/.5 Eb4/.5 C4/.5 | D4/1 r/1 Bb3/1 r/1`
-    },
-    ending: 'button',
-    solos: ['tbn', 'pno'],
-    trades: true
-  },
-
-  {
-    id: 'ballad-eb',
-    title: '늦은 편지',
-    key: 'Eb',
-    bpm: 64,
-    feel: 'ballad',
-    sections: 'A8 A8 B8 A8',
-    form: `Ebmaj7 Cm7 | Fm7 Bb7 | Gm7 C7b9 | Fm7 Bb7 | Ebmaj7 Eb7 | Abmaj7 Db7 | Gm7 C7 | Fm7 Bb7 |
-           Ebmaj7 Cm7 | Fm7 Bb7 | Gm7 C7b9 | Fm7 Bb7 | Ebmaj7 Eb7 | Abmaj7 Db7 | Fm7 Bb7 | Ebmaj7 |
-           Am7b5 D7b9 | Gm7 | Am7b5 D7b9 | Gm7 C7 | Fm7 | Bb7sus Bb7 | Gm7 C7b9 | Fm7 Bb7 |
-           Ebmaj7 Cm7 | Fm7 Bb7 | Gm7 C7b9 | Fm7 Bb7 | Ebmaj7 Eb7 | Abmaj7 Db7 | Fm7 Bb7 | Eb6`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      Bb3/1 G4/1.5 F4/.5 Eb4/1 | Ab3/1 F4/1.5 Eb4/.5 D4/1 |
-      G3/1 Bb3/1.5 C4/.5 Bb3/1 | Ab3/3 r/1 |
-      G4/1 Bb4/1.5 Ab4/.5 G4/1 | Eb4/1.5 C4/.5 F4/1.5 Eb4/.5 |
-      D4/1.5 Bb3/.5 E4/1.5 G4/.5 | F4/1 Ab4/1 G4/1.5 F4/.5 |
-      Bb3/1 G4/1.5 F4/.5 Eb4/1 | Ab3/1 F4/1 D4/1.5 C4/.5 |
-      G3/1 Bb3/1.5 C4/.5 Bb3/1 | Ab3/3 r/1 |
-      G4/1 Bb4/1.5 Ab4/.5 G4/1 | Eb4/1.5 C4/.5 F4/1.5 Eb4/.5 |
-      Ab3/1 C4/1 D4/1.5 F4/.5 | G4/3 r/1 |
-      C4/1 Eb4/1 F#4/1.5 Eb4/.5 | D4/3 r/.5 C4/.5 |
-      Eb4/1 G4/1 A4/1.5 F#4/.5 | Bb4/2 A4/1 G4/1 |
-      Ab4/2 G4/1 F4/1 | Eb4/2 D4/2 |
-      D4/1 F4/1 E4/1 Db4/1 | C4/2 D4/1.5 r/.5 |
-      Bb3/1 G4/1.5 F4/.5 Eb4/1 | Ab3/1 F4/1.5 Eb4/.5 D4/1 |
-      G3/1 Bb3/1.5 C4/.5 Bb3/1 | Ab3/3 r/1 |
-      G4/1 Bb4/1.5 Ab4/.5 G4/1 | Eb4/1.5 C4/.5 F4/1.5 Eb4/.5 |
-      Ab3/1 C4/1 D4/1.5 F4/.5 | G4/1 Eb4/3`
-    },
-    ending: 'rit',
-    solos: ['pno', 'tbn'],
-    trades: false
-  },
-  {
-    id: 'modal-d',
-    title: '깊은 물',
-    key: 'D',
-    bpm: 138,
-    feel: 'swing',
-    sections: 'A8 A8 B8 A8',
-    form: `Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 |
-           Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 |
-           Ebm7 | Ebm7 | Ebm7 | Ebm7 | Ebm7 | Ebm7 | Ebm7 | Ebm7 |
-           Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7 | Dm7`,
-    head: {
-      inst: 'bass+tbn',
-      passes: 1,
-      mel: `
-      b:D2/1 r/.5 b:A2/.5 b:C3/.5 b:D3/1 b:A2/.5 | b:F2/1 b:G2/.5 b:F2/.5 b:E2/1 r/1 |
-      r/.5 A3/.5 C4/.5 E4/.5 r/.5 D4/1 C4/.5~ | C4/1 A3/1 r/2 |
-      b:D2/1 r/.5 b:A2/.5 b:C3/.5 b:D3/1 b:F3/.5 | b:E3/1 b:D3/.5 b:C3/.5 b:A2/1 r/1 |
-      r/.5 F4/.5 E4/.5 D4/.5 r/.5 A3/1 C4/.5~ | C4/1 D4/1 r/2 |
-      b:D2/1 r/.5 b:A2/.5 b:C3/.5 b:D3/1 b:A2/.5 | b:F2/1 b:G2/.5 b:F2/.5 b:E2/1 r/1 |
-      r/.5 A3/.5 C4/.5 E4/.5 r/.5 G4/1 F4/.5~ | F4/1 E4/.5 C4/.5 D4/1 r/1 |
-      b:D2/1 r/.5 b:A2/.5 b:C3/.5 b:D3/1 b:F3/.5 | b:E3/1 b:D3/.5 b:C3/.5 b:A2/1 r/1 |
-      r/.5 F4/.5 E4/.5 D4/.5 r/.5 A3/1 C4/.5~ | C4/1 D4/1 r/2 |
-      b:Eb2/1 r/.5 b:Bb2/.5 b:Db3/.5 b:Eb3/1 b:Bb2/.5 | b:Gb2/1 b:Ab2/.5 b:Gb2/.5 b:F2/1 r/1 |
-      r/.5 Bb3/.5 Db4/.5 F4/.5 r/.5 Eb4/1 Db4/.5~ | Db4/1 Bb3/1 r/2 |
-      b:Eb2/1 r/.5 b:Bb2/.5 b:Db3/.5 b:Eb3/1 b:Gb3/.5 | b:F3/1 b:Eb3/.5 b:Db3/.5 b:Bb2/1 r/1 |
-      r/.5 Gb4/.5 F4/.5 Eb4/.5 r/.5 Bb3/1 Db4/.5~ | Db4/1 Eb4/1 r/2 |
-      b:D2/1 r/.5 b:A2/.5 b:C3/.5 b:D3/1 b:A2/.5 | b:F2/1 b:G2/.5 b:F2/.5 b:E2/1 r/1 |
-      r/.5 A3/.5 C4/.5 E4/.5 r/.5 D4/1 C4/.5~ | C4/1 A3/1 r/2 |
-      b:D2/1 r/.5 b:A2/.5 b:C3/.5 b:D3/1 b:F3/.5 | b:E3/1 b:D3/.5 b:C3/.5 b:A2/1 r/1 |
-      r/.5 F4/.5 E4/.5 D4/.5 r/.5 A3/1 C4/.5~ | C4/1 E4/.5 C4/.5 D4/1 r/1`
-    },
-    ending: 'cold',
-    solos: ['pno', 'bass', 'tbn'],
-    trades: false
-  },
-
-  {
-    id: 'shuffle-bb',
-    title: '느린 계단',
-    key: 'Bb',
-    bpm: 92,
-    feel: 'shuffle',
-    sections: 'A12',
-    blues: true,
-    form: 'Bb7 | Eb7 | Bb7 | Bb7 | Eb7 | Edim7 | Bb7 | G7 | Cm7 | F7 | Bb7 G7 | Cm7 F7',
-    head: {
-      inst: 'tbn',
-      passes: 2,
-      mel: `
-      r/.5 Db4/.5 D4/.5 F4/.5 Ab4/1 F4/1 | G4/1.5 F4/.5 Db4/1 r/1 |
-      r/.5 Db4/.5 D4/.5 F4/.5 Ab4/.5 Bb4/.5 Ab4/.5 F4/.5 | Db4/.5 D4/.5 Bb3/1 r/2 |
-      r/.5 Gb3/.5 G3/.5 Bb3/.5 Db4/1 Bb3/1 | Db4/1.5 Bb3/.5 G3/1 r/1 |
-      r/.5 Db4/.5 D4/.5 F4/.5 Ab4/1 F4/1 | B3/1.5 D4/.5 F4/1 r/1 |
-      Eb4/1 G4/.5 Eb4/.5 C4/1 r/1 | A3/1 C4/.5 Eb4/.5 F4/1 Ab4/.5 F4/.5 |
-      F4/.5 D4/.5 Db4/.5 Bb3/.5 B3/1 r/1 | C4/1 Eb4/1 r/.5 E4/.5 F4/1`
-    },
-    ending: 'tag',
-    solos: ['tbn', 'pno'],
-    trades: false
-  },
-
-  {
-    id: 'latin-f',
-    title: '붉은 지붕',
-    key: 'F',
-    bpm: 180,
-    feel: 'latin',
-    feelB: 'swing',
-    sections: 'A8 A8 B8 A8',
-    form: `Fm7 | Gm7b5 C7b9 | Fm7 | Gm7b5 C7b9 | Fm7 | Bbm7 | Gm7b5 C7b9 | Fm7 |
-           Fm7 | Gm7b5 C7b9 | Fm7 | Gm7b5 C7b9 | Fm7 | Bbm7 | Gm7b5 C7b9 | Fm7 |
-           Abmaj7 | Abmaj7 | Gm7b5 | C7b9 | Fm7 | Bb7 | Ebmaj7 | Gm7b5 C7b9 |
-           Fm7 | Gm7b5 C7b9 | Fm7 | Gm7b5 C7b9 | Fm7 | Bbm7 | Gm7b5 C7b9 | Fm7`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      r/.5 C4/.5 F4/.5 Ab4/1 G4/.5 F4/.5 Eb4/.5 | Db4/1 F4/.5 Db4/.5 E4/1.5 G4/.5 |
-      r/.5 C4/.5 F4/.5 Ab4/1 G4/.5 F4/.5 C4/.5 | Db4/1 Bb3/.5 G3/.5 E3/1 r/1 |
-      Ab4/.5 r/.5 Ab4/.5 G4/.5 r/.5 F4/1 Eb4/.5 | Db4/1.5 F4/.5 Ab4/1 F4/1 |
-      G4/1 F4/.5 Db4/.5 E4/1 Db4/.5 Bb3/.5 | C4/2 r/2 |
-      r/.5 C4/.5 F4/.5 Ab4/1 G4/.5 F4/.5 Eb4/.5 | Db4/1 F4/.5 Db4/.5 E4/1.5 G4/.5 |
-      r/.5 C4/.5 F4/.5 Ab4/1 G4/.5 F4/.5 C4/.5 | Db4/1 Bb3/.5 G3/.5 E3/1 r/1 |
-      Ab4/.5 r/.5 Ab4/.5 G4/.5 r/.5 F4/1 Eb4/.5 | Db4/1.5 F4/.5 Ab4/1 F4/1 |
-      G4/1 F4/.5 Db4/.5 E4/1 Db4/.5 Bb3/.5 | F4/2 r/1.5 Eb4/.5~ |
-      Eb4/1 C4/.5 Eb4/.5 G4/1.5 F4/.5 | Eb4/1 Bb3/.5 C4/.5 Eb4/1 r/.5 Db4/.5~ |
-      Db4/1.5 F4/.5 Bb4/1 G4/1 | E4/1 Db4/.5 E4/.5 G4/1 Bb3/1 |
-      Ab3/1 C4/.5 Eb4/.5 G4/1.5 F4/.5 | D4/1 F4/.5 Ab4/.5 G4/1 F4/1 |
-      G4/2 Bb3/1 D4/1 | Db4/1.5 F4/.5 E4/1 Db4/1 |
-      r/.5 C4/.5 F4/.5 Ab4/1 G4/.5 F4/.5 Eb4/.5 | Db4/1 F4/.5 Db4/.5 E4/1.5 G4/.5 |
-      r/.5 C4/.5 F4/.5 Ab4/1 G4/.5 F4/.5 C4/.5 | Db4/1 Bb3/.5 G3/.5 E3/1 r/1 |
-      Ab4/.5 r/.5 Ab4/.5 G4/.5 r/.5 F4/1 Eb4/.5 | Db4/1.5 F4/.5 Ab4/1 F4/1 |
-      G4/1 F4/.5 Db4/.5 E4/1 Db4/.5 Bb3/.5 | C4/1 F4/1 r/2`
-    },
-    ending: 'vampfade',
-    solos: ['pno', 'tbn', 'bass'],
-    trades: false
-  },
-
-  {
-    id: 'things-ab',
-    title: '모든 길',
-    key: 'Ab',
-    bpm: 150,
-    feel: 'swing',
-    sections: 'A8 A8 B8 C12',
-    form: `Fm7 | Bbm7 | Eb7 | Abmaj7 | Dbmaj7 | G7 | Cmaj7 | Cmaj7 |
-           Cm7 | Fm7 | Bb7 | Ebmaj7 | Abmaj7 | D7 | Gmaj7 | Gmaj7 |
-           Am7 | D7 | Gmaj7 | Gmaj7 | F#m7b5 | B7 | Emaj7 | C7alt |
-           Fm7 | Bbm7 | Eb7 | Abmaj7 | Dbmaj7 | Dbm7 | Cm7 | Bdim7 | Bbm7 | Eb7 | Abmaj7 | Gm7b5 C7b9`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      Ab4/.5 G4/.5 F4/.5 C4/.5 Eb4/1 r/.5 Db4/.5~ | Db4/1 F4/.5 Ab4/.5 F4/1 r/.5 G4/.5~ |
-      G4/1 F4/.5 Eb4/.5 Db4/.5 Bb3/.5 G3/.5 Bb3/.5 | C4/1.5 Eb4/.5 G4/2 |
-      F4/.5 Eb4/.5 Db4/.5 Ab3/.5 C4/1 r/.5 B3/.5~ | B3/1 D4/.5 F4/.5 A4/1 G4/1 |
-      E4/2 r/.5 D4/.5 E4/.5 G4/.5 | A4/1 G4/1 r/2 |
-      Eb4/.5 D4/.5 C4/.5 G3/.5 Bb3/1 r/.5 Ab3/.5~ | Ab3/1 C4/.5 Eb4/.5 C4/1 r/.5 D4/.5~ |
-      D4/1 C4/.5 Bb3/.5 Ab3/.5 F3/.5 D3/.5 F3/.5 | G3/1.5 Bb3/.5 D4/2 |
-      C4/.5 Bb3/.5 Ab3/.5 Eb3/.5 G3/1 r/.5 F#3/.5~ | F#3/1 A3/.5 C4/.5 E4/1 D4/1 |
-      B3/2 r/.5 A3/.5 B3/.5 D4/.5 | E4/1 D4/1 r/2 |
-      r/1 C4/1.5 E4/1.5~ | E4/1.5 F#4/.5 A4/1 C4/1 |
-      B3/1 D4/1.5 F#4/1.5~ | F#4/2 E4/1 r/1 |
-      r/1 A3/1.5 C4/1.5 | D#4/1.5 C#4/.5 A3/1 F#3/1 |
-      G#3/1 B3/1.5 D#4/1.5~ | Eb4/1 Db4/.5 E4/.5 Bb4/1 Ab4/.5 G4/.5 |
-      Ab4/.5 G4/.5 F4/.5 C4/.5 Eb4/1 r/.5 Db4/.5~ | Db4/1 F4/.5 Ab4/.5 F4/1 r/.5 G4/.5~ |
-      G4/1 F4/.5 Eb4/.5 Db4/.5 Bb3/.5 G3/.5 Bb3/.5 | C4/1.5 Eb4/.5 G4/2 |
-      F4/.5 Eb4/.5 Db4/.5 Ab3/.5 C4/1 r/1 | E4/1.5 Ab4/.5 B3/2 |
-      Bb3/1 Eb4/.5 G4/.5 Bb4/1 G4/1 | Ab4/1 F4/.5 D4/.5 B3/1 D4/1 |
-      Db4/1 F4/.5 Ab4/.5 F4/1 r/.5 G4/.5~ | G4/1 F4/.5 Eb4/.5 Db4/.5 Bb3/.5 G3/.5 Bb3/.5 |
-      C4/1.5 Eb4/.5 Ab4/2 | r/2 E4/1 G4/1`
-    },
-    ending: 'tag',
-    solos: ['bass', 'pno', 'tbn'],
-    trades: false
-  },
-
-  {
-    id: 'boogaloo-f',
-    title: '흔들 의자',
-    key: 'F',
-    bpm: 108,
-    feel: 'boogaloo',
-    sections: 'A16',
-    blues: true,
-    form: 'F7 | F7 | F7 | F7 | Bb7 | Bb7 | F7 | F7 | Gm7 | C7 | Gm7 | C7 | F7 | D7 | Gm7 C7 | F7',
-    head: {
-      inst: 'tbn+pno',
-      passes: 2,
-      mel: `
-      A3/.5 C4/.5 r/.5 Eb4/.5 r/.5 D4/.5 C4/1 | r/.5 F4/.5 r/.5 Eb4/.5 C4/.5 Ab3/.5 A3/1 |
-      A3/.5 C4/.5 r/.5 Eb4/.5 r/.5 D4/.5 C4/1 | r/.5 F4/.5 r/.5 Eb4/.5 F4/.5 G4/.5 A4/1 |
-      D4/.5 F4/.5 r/.5 Ab4/.5 r/.5 G4/.5 F4/1 | r/.5 Bb4/.5 r/.5 Ab4/.5 F4/.5 Db4/.5 D4/1 |
-      A3/.5 C4/.5 r/.5 Eb4/.5 r/.5 D4/.5 C4/1 | r/.5 F4/.5 r/.5 Eb4/.5 C4/.5 Ab3/.5 A3/1 |
-      Bb3/.5 D4/.5 r/.5 F4/.5 r/.5 D4/.5 Bb3/1 | r/.5 E4/.5 r/.5 G4/.5 Bb4/.5 G4/.5 E4/1 |
-      Bb3/.5 D4/.5 r/.5 F4/.5 r/.5 D4/.5 Bb3/1 | r/.5 E4/.5 r/.5 G4/.5 Bb4/.5 A4/.5 G4/1 |
-      A3/.5 C4/.5 r/.5 Eb4/.5 r/.5 D4/.5 C4/1 | r/.5 F#4/.5 r/.5 C4/.5 A3/.5 F#3/.5 A3/1 |
-      Bb3/.5 D4/.5 F4/.5 D4/.5 E4/.5 G4/.5 Bb4/1 | A4/1 r/1 F4/1 r/1`
-    },
-    ending: 'vampfade',
-    solos: ['pno', 'tbn'],
-    trades: false
-  },
-  {
-    id: 'train-c',
-    title: '막차',
-    key: 'C',
-    bpm: 176,
-    feel: 'swing',
-    sections: 'A8 A8 B8 A8',
-    form: `C6 | C6 | D7#11 | D7#11 | Dm7 | G7 | C6 | Dm7 G7 |
-           C6 | C6 | D7#11 | D7#11 | Dm7 | G7 | C6 | Dm7 G7 |
-           Fmaj7 | Fmaj7 | Fmaj7 | Fmaj7 | D7 | D7 | Dm7 | G7 |
-           C6 | C6 | D7#11 | D7#11 | Dm7 | G7 | C6 | C6`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      E4/.5 E4/.5 r/.5 G4/.5 E4/1 C4/1 | r/.5 D4/.5 E4/.5 G4/.5 A4/1.5 G#4/.5~ |
-      G#4/1.5 F#4/.5 E4/1 C4/1 | D4/1 r/.5 A3/.5 C4/.5 D4/.5 F#4/1 |
-      F4/.5 F4/.5 r/.5 A4/.5 F4/1 D4/1 | r/.5 D4/.5 F4/.5 A4/.5 G4/1 F4/1 |
-      E4/2.5 r/1.5 | r/1 D4/.5 E4/.5 F4/1 G4/1 |
-      E4/.5 E4/.5 r/.5 G4/.5 E4/1 C4/1 | r/.5 D4/.5 E4/.5 G4/.5 A4/1.5 G#4/.5~ |
-      G#4/1.5 F#4/.5 E4/1 C4/1 | D4/1 r/.5 A3/.5 C4/.5 D4/.5 F#4/1 |
-      F4/.5 F4/.5 r/.5 A4/.5 F4/1 D4/1 | r/.5 D4/.5 F4/.5 A4/.5 G4/1 F4/1 |
-      E4/2.5 r/1.5 | r/1 D4/.5 E4/.5 F4/1 G4/1 |
-      A4/2 G4/1 F4/1 | E4/1.5 C4/.5 A3/2 |
-      r/.5 C4/.5 F4/.5 A4/.5 G4/1 E4/1 | F4/2 r/1.5 F#4/.5~ |
-      F#4/1.5 A4/.5 C4/1 E4/1 | D4/1 F#4/.5 A4/.5 F#4/1 r/1 |
-      F4/1.5 E4/.5 D4/1 C4/1 | B3/1 D4/.5 F4/.5 A4/1 G4/1 |
-      E4/.5 E4/.5 r/.5 G4/.5 E4/1 C4/1 | r/.5 D4/.5 E4/.5 G4/.5 A4/1.5 G#4/.5~ |
-      G#4/1.5 F#4/.5 E4/1 C4/1 | D4/1 r/.5 A3/.5 C4/.5 D4/.5 F#4/1 |
-      F4/.5 F4/.5 r/.5 A4/.5 F4/1 D4/1 | r/.5 D4/.5 F4/.5 A4/.5 G4/1 F4/1 |
-      E4/2.5 r/1.5 | r/.5 G3/.5 A3/.5 C4/.5 D4/.5 E4/.5 C4/1`
-    },
-    ending: 'tag',
-    solos: ['tbn', 'bass', 'pno'],
-    trades: false
-  },
-
-  {
-    id: 'minor-blues-c',
-    title: '그림자',
-    key: 'C',
-    bpm: 190,
-    feel: 'swing',
-    sections: 'A12',
-    blues: true,
-    form: 'Cm7 | Fm7 | Cm7 | Cm7 | Fm7 | Fm7 | Cm7 | Cm7 | Abmaj7 | G7alt | Cm7 | Dm7b5 G7alt',
-    head: {
-      inst: 'tbn',
-      passes: 2,
-      mel: `
-      C4/.5 r/.5 G4/.5 r/.5 Bb4/.5 Ab4/.5 G4/1 | Eb4/1.5 F4/.5 r/.5 C4/1 Eb4/.5 |
-      C4/.5 r/.5 G4/.5 r/.5 Bb4/.5 Ab4/.5 G4/.5 Eb4/.5 | F4/.5 G4/.5 Eb4/.5 C4/.5 r/2 |
-      F3/.5 r/.5 C4/.5 r/.5 Eb4/.5 Db4/.5 C4/1 | Ab3/1.5 Bb3/.5 r/.5 F3/1 Ab3/.5 |
-      C4/.5 r/.5 G4/.5 r/.5 Bb4/.5 Ab4/.5 G4/1 | Eb4/1.5 D4/.5 r/.5 C4/1 Eb4/.5~ |
-      Eb4/1 G4/.5 Eb4/.5 C4/1 Ab3/1 | B3/1 Ab3/.5 B3/.5 Eb4/1 F4/1 |
-      Eb4/1 D4/.5 C4/.5 G3/1 r/1 | F4/1 D4/.5 Ab4/.5 B3/1 r/1`
-    },
-    ending: 'button',
-    solos: ['pno', 'tbn'],
-    trades: false
-  },
-
-  {
-    id: 'tuneup-d',
-    title: '내리막',
-    key: 'D',
-    bpm: 184,
-    feel: 'swing',
-    sections: 'A16',
-    form: 'Em7 | A7 | Dmaj7 | Dmaj7 | Dm7 | G7 | Cmaj7 | Cmaj7 | Cm7 | F7 | Bbmaj7 | Bbmaj7 | Em7 | A7 | Dmaj7 | Em7 A7',
-    head: {
-      inst: 'tbn',
-      passes: 2,
-      mel: `
-      r/.5 B3/.5 D4/.5 E4/.5 G4/1 F#4/.5 E4/.5 | C#4/1 E4/.5 G4/.5 F#4/1 E4/1 |
-      F#4/1.5 A4/.5 C#4/2~ | C#4/1 r/3 |
-      r/.5 A3/.5 C4/.5 D4/.5 F4/1 E4/.5 D4/.5 | B3/1 D4/.5 F4/.5 E4/1 D4/1 |
-      E4/1.5 G4/.5 B3/2~ | B3/1 r/3 |
-      r/.5 G3/.5 Bb3/.5 C4/.5 Eb4/1 D4/.5 C4/.5 | A3/1 C4/.5 Eb4/.5 D4/1 C4/1 |
-      D4/1.5 F4/.5 A3/2~ | A3/1 r/3 |
-      G4/.5 F#4/.5 E4/.5 D4/.5 B3/.5 D4/.5 E4/.5 G4/.5 | A4/.5 G4/.5 E4/.5 C#4/.5 B3/.5 C#4/.5 E4/.5 G4/.5 |
-      F#4/2 r/2 | r/.5 B3/.5 D4/.5 E4/.5 C#4/1 r/1`
-    },
-    ending: 'tag',
-    solos: ['tbn', 'pno', 'bass'],
-    trades: true
-  },
-
-  {
-    id: 'georgia-f',
-    title: '달리는 밤',
-    key: 'F',
-    bpm: 220,
-    feel: 'swing',
-    sections: 'A16 B16',
-    form: `D7 | D7 | D7 | D7 | G7 | G7 | G7 | G7 | C7 | C7 | C7 | C7 | F6 | F6 | Gm7 | C7 |
-           D7 | D7 | D7 | D7 | Gm7 | Gm7 | D7 | D7 | Gm7 | D7 | Gm7 | D7 | F6 | D7 | Gm7 C7 | F6`,
-    head: {
-      inst: 'tbn',
-      passes: 1,
-      mel: `
-      r/.5 A3/.5 D4/.5 F#4/1 A4/1.5~ | A4/2 F#4/1 D4/1 |
-      E4/1 F#4/.5 E4/.5 C4/1 A3/1 | r/2 A3/.5 B3/.5 D4/.5 F4/.5~ |
-      F4/1.5 D4/.5 B3/1 G3/1 | r/.5 B3/.5 D4/.5 F4/.5 A4/1 G4/1 |
-      F4/1 D4/1 B3/1.5 G3/.5 | r/2 G3/.5 A3/.5 Bb3/.5 E4/.5~ |
-      E4/1.5 G4/.5 Bb4/1 G4/1 | r/.5 E4/.5 G4/.5 A4/.5 Bb4/1 A4/1 |
-      G4/1 E4/1 C4/1.5 E4/.5 | D4/1 E4/1 G4/1 Bb4/1 |
-      A4/2 F4/1 D4/1 | C4/1.5 A3/.5 r/2 |
-      Bb3/1 D4/1 F4/1 A4/1 | G4/1 E4/1 r/1.5 F#4/.5~ |
-      F#4/2 A4/1 F#4/1 | E4/1 D4/1 C4/1 A3/1 |
-      r/.5 F#3/.5 A3/.5 C4/.5 E4/1 F#4/1 | A4/1 F#4/1 r/1.5 Bb3/.5~ |
-      Bb3/1.5 D4/.5 F4/1 D4/1 | G4/1 F4/1 D4/1 Bb3/1 |
-      A3/1 C4/1 F#4/1 E4/1 | D4/2 r/2 |
-      r/.5 Bb3/.5 D4/.5 F4/.5 G4/1 Bb4/1 | A4/1 F#4/1 C4/1 A3/1 |
-      Bb3/1 D4/.5 F4/.5 A4/1 G4/1 | F#4/1 E4/1 C4/1 r/1 |
-      A3/1 C4/1 D4/1 F4/1 | F#4/1 A4/1 C4/1 A3/1 |
-      Bb3/1 D4/1 E4/1 G4/1 | A4/1 r/1 F4/1 r/1`
-    },
-    ending: 'button',
-    solos: ['pno', 'tbn'],
-    trades: true
-  },
-
-  {
-    id: 'closer-bb',
-    title: '잘 자요',
-    key: 'Bb',
-    bpm: 230,
-    feel: 'swing',
-    sections: 'A12',
-    blues: true,
-    form: 'Bb7 | Eb7 | Bb7 | Fm7 Bb7 | Eb7 | Edim7 | Bb7 | Dm7 G7 | Cm7 | F7 | Bb7 G7 | Cm7 F7',
-    head: {
-      inst: 'tbn',
-      passes: 2,
-      mel: `
-      r/.5 F4/1 D4/2.5 | r/.5 G4/1 Eb4/2.5 |
-      r/.5 F4/1 D4/1 F4/.5 G4/.5 Ab4/.5 | F4/1 Eb4/1 D4/2 |
-      r/.5 G4/1 Eb4/2.5 | r/.5 G4/1 E4/2.5 |
-      r/.5 F4/1 D4/2.5 | r/1 A3/1 B3/1 D4/1 |
-      Eb4/1.5 C4/.5 G3/1 r/1 | A3/1.5 C4/.5 Eb4/1 r/1 |
-      D4/1 Bb3/1 B3/1 D4/1 | C4/1 Eb4/1 F4/1 r/1`
-    },
-    ending: 'button',
-    solos: ['tbn', 'pno'],
-    trades: true
-  },
-];
-
 // ===== 41_harmony.js =====
 // ===================== 화성 =====================
 // S = 정박에 둘 수 있는 음, W = 엇박까지 허용하는 음 (근음 기준 반음 수), v = 피아노 왼손 보이싱 두 가지
@@ -8580,18 +8078,13 @@ function takeover(now) {
     if (e.type === 'tuneStart') reactionAt = Math.max(reactionAt, e.t);
     else if (['seg', 'solo', 'soloEnd', 'cue', 'takeover'].includes(e.type)) VQ.splice(i, 1);
   }
-  vq(reactionAt, 'song', 'takeover', {
-    from: prev
-  });
+  vq(reactionAt, 'song', 'takeover', { from: prev });
 }
 
 function cancelSoloNotes(now) {
-  for (const {
-      h
-    }
-    of MUS.soloH) {
+  for (const { h } of MUS.soloH) {
     try {
-      const g = h.g ? h.g.gain : null;
+      const g = MUS.soloH.g?.gain ?? null;
       if (g) {
         g.cancelScheduledValues(now);
         g.setTargetAtTime(0, now, 0.02);
@@ -8599,7 +8092,7 @@ function cancelSoloNotes(now) {
       if (h.lg) {
         h.lg.gain.cancelScheduledValues(now);
       }
-    } catch (e) {}
+    } catch {}
   }
   MUS.soloH.length = 0;
   for (let i = VQ.length - 1; i >= 0; i--) {
@@ -9575,7 +9068,7 @@ function initTrumpet() {
   try {
     const m = localStorage.getItem('egotrip.mode');
     if (m === 'free' || m === 'snap') TP.mode = m;
-  } catch (e) {}
+  } catch {}
 }
 
 function setMode(m) {
@@ -9583,7 +9076,7 @@ function setMode(m) {
   TP.mode = m;
   try {
     localStorage.setItem('egotrip.mode', m);
-  } catch (e) {}
+  } catch {}
 }
 const canPlay = () => !!AE.ctx;
 
@@ -16948,7 +16441,7 @@ function afterSave() {
       songs: MUS.songsPlayed,
       at: Date.now()
     }));
-  } catch (e) {}
+  } catch {}
 }
 
 function afterShow() {
@@ -17219,7 +16712,7 @@ function initUI() {
     }
   });
   const tryDecode = async () => {
-    if (!window.JAZZ_AUDIO) return;
+    if (!JAZZ_AUDIO) return;
     try {
       createAudio();
       PACK.on = f => {
@@ -17263,7 +16756,7 @@ function titleTap() {
   try {
     if (!AE.ctx) createAudio();
     if (AE.ctx.state !== 'running') AE.ctx.resume().catch(() => {});
-  } catch (e) {}
+  } catch {}
   UI.el.startLabel.textContent = '곧 시작';
 }
 
@@ -17278,13 +16771,13 @@ async function startGame() {
     UI.el.startLabel.textContent = '곧 시작';
     try {
       if (AE.ctx.state !== 'running') AE.ctx.resume().catch(() => {});
-    } catch (e) {}
+    } catch {}
     return;
   }
   UI.starting = true;
   try {
     await AE.ctx.resume();
-  } catch (e) {}
+  } catch {}
   UI.starting = false;
   UI.wantStart = false;
   UI.el.title.classList.add('hide');
@@ -17320,7 +16813,7 @@ async function resumeGame() {
   UI.el.paused.classList.add('hide');
   try {
     await AE.ctx.resume();
-  } catch (e) {}
+  } catch {}
   UI.inputRect = null;
   UI.playing = true;
   GAME.state = 'play';
@@ -21055,16 +20548,10 @@ let VENUE = null;
 function initScene() {
   const canvas = document.getElementById('scene');
   const dpr = window.devicePixelRatio || 1;
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: dpr < 1.5,
-    powerPreference: 'high-performance'
-  });
+  const renderer = new THREE.WebGLRenderer({ canvas });
   renderer.setPixelRatio(Math.min(dpr, 1.75));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NoToneMapping;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.shadowMap.autoUpdate = false;
   renderer.autoClear = false;
   SC.renderer = renderer;
@@ -21153,9 +20640,7 @@ function boot() {
     AE.at.boot0 = bootT0;
     AE.at.boot1 = performance.now();
   }
-  window.__booted = true;
-  if (/norender/.test(location.search)) setInterval(() => tick(false), 33); // 시험용: 그리지 않고 진행만
-  else if (!/shot/.test(location.search)) requestAnimationFrame(loop);
+  requestAnimationFrame(loop);
 }
 
 function frame(dt) {
@@ -21319,7 +20804,7 @@ function perfTick(rawDt) {
     perfApply();
     try {
       sessionStorage.setItem('egotrip.perf', String(PERF.level));
-    } catch (e) {}
+    } catch {}
   }
 }
 
@@ -21337,7 +20822,7 @@ function perfRestore() {
       PERF.level = lv;
       perfApply();
     }
-  } catch (e) {}
+  } catch {}
 }
 
 function tick(draw) {
@@ -21354,33 +20839,19 @@ function tick(draw) {
     warmTick(GAME.phase === 'title' ? (UI.wantStart ? 40 : 16) : 3);
     if (!WARM.q.length && UI.wantStart && AE.decoded && !UI.playing) startGame();
   }
-  const pf = window.__prof,
-    p0 = pf ? performance.now() : 0;
   try {
     frame(dt);
   } catch (err) {
     if (!tick.errs) tick.errs = 0;
     if (tick.errs++ < 5) console.error(err);
   }
-  const p1 = pf ? performance.now() : 0;
   if (draw) render();
-  if (pf) pf(p1 - p0, draw ? performance.now() - p1 : 0, dt);
 }
 
 function loop() {
   requestAnimationFrame(loop);
   tick(true);
 }
-
-window.__step = (sec = 1, fps = 30) => {
-  for (let i = 0; i < sec * fps; i++) {
-    NOW.t += 1 / fps;
-    frame(1 / fps);
-  }
-  render();
-  window.__ready = true;
-  return 'ok';
-};
 
 // 무대 만들기(본 화면이 1초~몇 초 멈춤)에 들어가기 전에 소리 쪽 일을 먼저 출발시킴.
 // 워커는 본 화면이 쉬어야 뜨므로, 워커가 떴다는 신호를 받고 나서(안 오면 0.4초 뒤) 무대를 만듦.
@@ -21391,16 +20862,11 @@ function bootSoon() {
     ran = true;
     boot();
     if (AE.synWatch) AE.synWatch();
-    if (/shot/.test(location.search)) {
-      window.__step(1.5);
-    }
   };
   try {
     synthBegin(() => setTimeout(go, 0));
-    if (window.JAZZ_AUDIO) packBegin();
-  } catch (e) {
-    console.error(e);
-  }
+    if (JAZZ_AUDIO) packBegin();
+  } catch (e) { console.error(e); }
   setTimeout(go, 400);
 }
 bootSoon();

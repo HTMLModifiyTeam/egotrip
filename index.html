@@ -8,8 +8,13 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎺</text></svg>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Hahmlet:wght@700;900&family=IBM+Plex+Sans+KR:wght@400;600;700&display=swap" rel="stylesheet">
-    <script type="importmap">{"imports":{"three":"https://threejs.org/build/three.module.js"}}</script>
+    <script type="importmap">
+      {"imports": {
+        "three": "https://threejs.org/build/three.module.js",
+        "three/addons/": "https://threejs.org/examples/jsm/"
+      }}</script>
   </head>
 
   <body>
@@ -120,7 +125,8 @@
     <script>
       (function () {
         var s = document.createElement('script');
-        s.src = 'audio.js';
+        s.src = 'js/data/audio.js';
+        s.type = 'module';
         s.async = true;
         s.onload = function () {
           window.__audioReady = true;
