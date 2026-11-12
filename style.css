@@ -453,6 +453,12 @@ button {
   display: none
 }
 
+/* Fight button and ending */
+#fight { position:fixed; right:calc(10px + var(--sar)); top:calc(66px + var(--sat)); z-index:6; display:none; background:var(--vermilion); color:var(--paper); font-weight:900; }
+.game-over-card { text-align:center; background:var(--paper); border:3px solid var(--ink); border-radius:24px; padding:30px 34px 26px; box-shadow:0 10px 0 3px rgba(34,26,43,.32); transform:rotate(-3deg); }
+.game-over-eyebrow { color:var(--vermilion); font-weight:900; letter-spacing:.16em; font-size:12px; }
+.game-over-title { margin:8px 0 20px; font:900 clamp(38px,10vw,64px)/1 var(--fd); letter-spacing:-.06em; }
+
 /* ---------- 덮개 화면 ---------- */
 .screen {
   position: fixed;

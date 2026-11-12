@@ -5216,6 +5216,16 @@ const FACES = {
     pupil: 0.72,
     pop: 1.08
   },
+  angry: {
+    brow: -1.15,
+    browIn: -0.8,
+    lid: 0.55,
+    open: 0.38,
+    smile: -1,
+    width: -0.18,
+    pupil: 0.9,
+    pop: 1.03
+  },
   stank: {
     brow: -0.7,
     browIn: -0.9,
@@ -12289,6 +12299,7 @@ const CROWD = {
   roar: 0,
   clapBed: 0
 };
+const FIGHT = { on: false, t0: 0, fall: 0, booUntil: 0 };
 const _cv1 = new THREE.Vector3(),
   _cv2 = new THREE.Vector3(),
   _cv3 = new THREE.Vector3(),
@@ -13307,6 +13318,31 @@ function crowdUpdate(dt, t, beat) {
     f = R.frenzy,
     burst = R.burst && t < R.burst.until ? R.burst : null;
   CROWD.me.copy(SC.camera ? SC.camera.position : V3(0, 2.4, 1));
+  if (FIGHT.on) {
+    const age = t - FIGHT.t0, rush = smooth01(age / 2.1);
+    for (const m of CROWD.list) {
+      const p = m.p; if (!p.root.visible) continue;
+      if (!m.fightFace) { p.express("angry", 0); m.fightFace = true; }
+      const start = m.fightStart || (m.fightStart = p.root.position.clone());
+      const spread = (m.wild - 0.5) * 0.8;
+      const target = V3(CROWD.me.x + spread, 0, CROWD.me.z + 0.45 + (m.wild * 0.7));
+      p.root.position.lerpVectors(start, target, rush);
+      p.root.rotation.y += (Math.atan2(CROWD.me.x - p.root.position.x, CROWD.me.z - p.root.position.z) - p.root.rotation.y) * Math.min(1, dt * 2);
+      p.c.stand = 1; p.c.lean = 0.28 + rush * 0.22; p.c.headTilt = Math.sin(t * 9 + m.phase0) * 0.12;
+      p.c.headShake = Math.sin(t * 18 + m.phase0) * 0.16; p.c.step = 0.5 + rush * 0.5; p.c.look.copy(CROWD.me);
+      p.update(Math.min(dt, .1), t, beat);
+    }
+    if (!FIGHT.gameOver && t > FIGHT.booUntil && AE.decoded && AE.ctx) {
+      FIGHT.booUntil = t + 1.5; const now = AE.ctx.currentTime;
+      for (let i = 0; i < 5; i++) voiceBlip(now + rand(0, .8), { dur:rand(.45,.8), f0:rand(115,205), fem:false, v0:VOWEL.u, v1:VOWEL.u, vol:rand(.07,.14), att:.07, hold:.7, curve:[[0,1.05],[.28,.94],[1,.72]], rough:.18, pan:rand(-.9,.9) });
+    }
+    aimCamera();
+    if (age > 4.4 && !FIGHT.gameOver) {
+      FIGHT.gameOver = true;
+      document.getElementById("gameOver").classList.remove("hide");
+    }
+    return;
+  }
   // 누구를 볼까: 솔로하는 밴드 멤버
   let soloPos = CROWD.stageC;
   if (R.floor && R.floor !== 'me' && BAND[R.floor]) soloPos = BAND[R.floor].headWorld(_cv3).clone();
@@ -15900,6 +15936,7 @@ function preFinish() {
   UI.el.hudMode.style.display = 'inline-flex';
   UI.el.special.style.display = 'block';
   UI.el.endShow.style.display = 'inline-flex';
+  UI.el.fight.style.display = 'inline-flex';
   startSet({
     count: true
   });
@@ -16668,6 +16705,7 @@ function initUI() {
     nextSong: $('nextSong'),
     special: $('special'),
     endShow: $('endShow'),
+    fight: $('fight'),
     finBar: $('finBar'),
     encore: $('encore'),
     finHome: $('finHome')
@@ -16687,6 +16725,8 @@ function initUI() {
   $('toTitle').onclick = () => location.reload();
   UI.el.pause.onclick = () => pauseGame();
   UI.el.nextSong.onclick = () => nextSong();
+  UI.el.fight.onclick = () => fightStart();
+  $('gameOverHome').onclick = () => location.reload();
   // 첫 화면은 아무 데나 눌러도 시작
   UI.el.title.addEventListener('click', e => {
     e.preventDefault();
@@ -18330,6 +18370,30 @@ const FIN_PENQ = (() => {
 })();
 
 // ---------- 끝내기 버튼 ----------
+function fightStart() {
+  if (FIGHT.on || GAME.phase !== "play") return;
+  FIGHT.on = true; FIGHT.t0 = NOW.t; FIGHT.booUntil = 0; FIGHT.gameOver = false;
+  FIN.req = true; setAuto(false); releaseAllInput(); fingerVisual(null);
+  TP.blowing = false; TP.voice = null; MUS.running = false;
+  if (AE.ctx) stopBandVoices(AE.ctx.currentTime);
+  if (ITL.cur) itlEnd();
+  for (const id of ["fight", "endShow", "nextSong", "pause", "hudMode", "autoMode", "special"]) {
+    const el = document.getElementById(id);
+    if(el) el.style.display="none";
+  }
+  document.getElementById("controls").classList.add("off");
+  REACT.burst = null; setBed("applause", 0); setBed("babble", 0);
+  for (const m of CROWD.list) {
+    m.fightStart = m.p.root.position.clone();
+    m.fightFace = false;
+    m.act = null;
+    m.pending = null;
+    m.p.express("angry", 0);
+    m.fightFace = true;
+  }
+  aimCamera();
+}
+
 function finRequest() {
   if (FIN.req || FIN.on || GAME.phase !== 'play' || !UI.playing || !AE.ctx || !MUS.running) return;
   const fromAuto = AUTO.on;
@@ -18405,8 +18469,9 @@ function finUI() {
   const show = (el, on, d = 'inline-flex') => {
     if (el) el.style.display = on ? d : 'none';
   };
-  show(E.nextSong, play && !FIN.req);
-  show(E.endShow, play && !FIN.req);
+  show(E.nextSong, play && !FIN.req && !FIGHT.on);
+  show(E.endShow, play && !FIN.req && !FIGHT.on);
+  show(E.fight, play && !FIN.req && !FIN.on && !FIGHT.on);
   show(E.hudMode, play);
   show(E.special, play, 'block');
   if (GAME.phase !== 'pre' && GAME.phase !== 'title') E.controls.classList.toggle('off', fin);
@@ -20620,6 +20685,11 @@ function aimCamera() {
   if (k > 0.0005 && FIN.lay) {
     SC.camera.position.lerp(FIN.lay.eye, k);
     SC.camera.quaternion.slerp(FIN.lay.q, k);
+  }
+  if (FIGHT.on) {
+    const fall = smooth01((NOW.t - FIGHT.t0 - 1.55) / 1.45);
+    FIGHT.fall = fall; SC.camera.position.y -= fall * 1.28; SC.camera.position.z += fall * 0.35;
+    SC.camera.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(fall * 0.32, 0, -fall * 1.22, "XYZ")));
   }
 }
 
