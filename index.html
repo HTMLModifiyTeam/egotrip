@@ -26,18 +26,14 @@
           <div class="hi"></div>
           <div id="marks"></div>
         </div>
-        <div id="headKnob" aria-hidden="true"><svg viewBox="0 0 48 48" preserveAspectRatio="none" focusable="false">
-            <g stroke="#fffaf0" stroke-width="2.3" stroke-linecap="round" fill="none">
-              <path d="M13.2 8.4V17.9M20.4 6.2V16.6M27.6 6.2V16.6M34.6 8.8V18.3" />
-            </g>
-            <g fill="#fffaf0">
-              <ellipse cx="18.1" cy="25.2" rx="2" ry="2.3" />
-              <ellipse cx="29.9" cy="25.2" rx="2" ry="2.3" />
-            </g>
-            <path d="M19.9 32.3a4.6 4.6 0 0 0 8.2 0" fill="none" stroke="#fffaf0" stroke-width="2.3"
-              stroke-linecap="round" />
-          </svg></div>
         <div id="finger"></div>
+      </div>
+    </div>
+    <div id="customMenu" class="custom-menu" aria-label="Custom actions">
+      <button id="customToggle" class="custom-toggle" aria-expanded="false" aria-controls="customPanel">MENU <kbd>E</kbd></button>
+      <div id="customPanel" class="custom-panel" hidden>
+        <button id="fight" class="pill custom-action" aria-label="Fight">Fight</button>
+        <button id="meteor" class="pill custom-action meteor-action" aria-label="Summon meteor">Meteor</button>
       </div>
     </div>
     <button id="pause" aria-label="멈춤"><i></i><i></i></button>
@@ -45,7 +41,6 @@
         <path d="M2 2v12l9-6zM12 2h2v12h-2z" />
       </svg></button>
     <button id="endShow" class="pill" aria-label="공연 끝내기"><i></i>공연 끝내기</button>
-    <button id="fight" class="pill" aria-label="Fight">Fight</button>
     <div id="finBar"><button id="encore" class="pill go">한 곡 더</button><button id="finHome" class="pill">처음으로</button>
     </div>
     <button id="special" aria-label="트럼펫 두 대"><span class="fill"></span><svg viewBox="9 9 102 102" aria-hidden="true">
@@ -128,17 +123,18 @@
     </div>
     <script>
       (function () {
+        const audiopackEvt = new Event('audiopack');
         var s = document.createElement('script');
         s.src = 'js/data/audio.js';
         s.type = 'module';
         s.async = true;
         s.onload = function () {
           window.__audioReady = true;
-          window.dispatchEvent(new Event('audiopack'));
+          window.dispatchEvent(audiopackEvt);
         };
         s.onerror = function () {
           window.__audioFailed = true;
-          window.dispatchEvent(new Event('audiopack'));
+          window.dispatchEvent(audiopackEvt);
         };
         document.head.appendChild(s);
       })();
