@@ -16,33 +16,38 @@ const personArm = () => ({
   init: false
 });
 
+const G = {
+  sph: (seg = 20, r = 12) => new THREE.SphereGeometry(1, seg, r),
+  capSeg: 6,
+  cap: (len, rad, seg = 12) => new THREE.CapsuleGeometry(rad, Math.max(0.001, len - 2 * rad), G.capSeg, seg), // 길이 = 전체 길이, y축
+  cyl: (rt, rb, h, seg = 16, open = false) => new THREE.CylinderGeometry(rt, rb, h, seg, 1, open),
+  tor: (R, r, seg = 24, rs = 8, arc = Math.PI * 2) => new THREE.TorusGeometry(R, r, rs, seg, arc),
+};
+
 const torsoW = p => {
   const y = p.y;
   if (y < spY) {
-    const t = smoothstep(hipY - 0.02, spY, y);
+    const t = THREE.MathUtils.smoothstep(hipY - 0.02, spY, y);
     return [[Bn.hips, 1 - t], [Bn.spine, t]];
   }
   if (y < chY) {
-    const t = smoothstep(spY, chY + 0.02, y);
+    const t = THREE.MathUtils.smoothstep(spY, chY + 0.02, y);
     return [[Bn.spine, 1 - t], [Bn.chest, t]];
   }
-  const t = smoothstep(nkY - 0.03, nkY + 0.03, y);
+  const t = THREE.MathUtils.smoothstep(nkY - 0.03, nkY + 0.03, y);
   return [[Bn.chest, 1 - t], [Bn.neck, t]];
 };
 
-const _pv1 = new THREE.Vector3();
+const _pv1 = new THREE.Vector3(), _pv2 = new THREE.Vector3(), _pv3 = new THREE.Vector3(), _pv4 = new THREE.Vector3(), _pv5 = new THREE.Vector3();
+const _pq1 = new THREE.Quaternion(), _pq2 = new THREE.Quaternion(), _pq3 = new THREE.Quaternion();
 
 // 두 점 사이에 놓는 캡슐 행렬
 function capBetween(a, b, rad, seg = 12) {
-  const d = _pv1.copy(b).sub(a),
-    len = d.length();
+  const d = _pv1.copy(b).sub(a), len = d.length();
   const g = G.cap(len + rad * 0.0, rad, seg);
   const q = new THREE.Quaternion().setFromUnitVectors(UPY, d.clone().normalize());
   const mid = a.clone().add(b).multiplyScalar(0.5);
-  return {
-    g,
-    m: new THREE.Matrix4().compose(mid, q, new THREE.Vector3(1, 1, 1))
-  };
+  return { g, m: new THREE.Matrix4().compose(mid, q, new THREE.Vector3(1, 1, 1)) };
 }
 
 // 앞(+z)으로 볼록하게 휨: z -= k·x² (단위 구 기준)
@@ -55,6 +60,24 @@ function bendZ(g, k) {
   g.computeVertexNormals();
   return g;
 }
+
+const PERSON_SYNC = THREE.Object3D.prototype.updateMatrixWorld;
+
+const _ik = {
+  S: new THREE.Vector3(),
+  dv: new THREE.Vector3(),
+  pp: new THREE.Vector3(),
+  E: new THREE.Vector3(),
+  Tc: new THREE.Vector3(),
+  ax: new THREE.Vector3(),
+  t: new THREE.Vector3(),
+  X: new THREE.Vector3(),
+  Y: new THREE.Vector3(),
+  Z: new THREE.Vector3(),
+  m: new THREE.Matrix4(),
+  qw: new THREE.Quaternion(),
+  qp: new THREE.Quaternion()
+};
 
 export class Person {
   constructor(look = {}, o = {}) {
@@ -128,9 +151,7 @@ export class Person {
   }
   // ----- 뼈대 -----
   makeBones() {
-    const h = this.h,
-      w = this.w,
-      H = this.H;
+    const h = this.h, w = this.w, H = this.H;
     const R = 0.118 * H;
     this.R = R;
     const P = this.P = {
@@ -236,8 +257,7 @@ export class Person {
       top = L.top || '#2f5bd8',
       pants = L.pants || '#22244a',
       shoes = L.shoes || '#2a1e1a';
-    const hair = L.hairColor || '#2a2018',
-      style = L.topStyle || 'tee';
+    const hair = L.hairColor || '#2a2018', style = L.topStyle || 'tee';
     const sleeve = L.jacket || top;
 
     const Bn = BONE;
@@ -462,7 +482,7 @@ export class Person {
     rig.add(G.sph(sseg, [18, 13, 11][lo] || 11), skin, hb, headM);
     // 턱·볼 (아래 앞쪽으로 살짝). 입을 크게 벌리면 아래턱이 늘어나며 내려감
     rig.add(G.sph(sseg, 12), skin, p => {
-      const k = smoothstep(hc.y - R * 0.4, hc.y - R * 0.86, p.y);
+      const k = THREE.MathUtils.smoothstep(hc.y - R * 0.4, hc.y - R * 0.86, p.y);
       return [
         [Bn.jaw, k],
         [hb, 1 - k]
@@ -506,14 +526,8 @@ export class Person {
       // 가운데는 입 뼈, 양끝은 입꼬리 뼈 (입 안 어둠은 같은 모양을 따라가는 안쪽 뼈들)
       const split = (ce, cl, cr) => p => {
         const ax = Math.abs(p.x - hw.x);
-        const t = smoothstep(mw * 0.25, mw * 0.95, ax);
-        return p.x >= hw.x ? [
-          [ce, 1 - t],
-          [cl, t]
-        ] : [
-          [ce, 1 - t],
-          [cr, t]
-        ];
+        const t = THREE.MathUtils.smoothstep(mw * 0.25, mw * 0.95, ax);
+        return p.x >= hw.x ? [[ce, 1 - t], [cl, t]] : [[ce, 1 - t], [cr, t]];
       };
       const m0 = [hw.x, hw.y + mp.y, hw.z + mp.z];
       rig.add(bendZ(G.sph(18, 10), 0.55), L.mouthColor || '#6a1824', split(Bn.mouth, Bn.cornerL, Bn.cornerR), M4(m0, [0.1, 0, 0], [mw, R * 0.16, R * 0.08]), 1);
@@ -539,7 +553,7 @@ export class Person {
           if (rr < 1e-4) continue;
           let a = Math.atan2(z, -x);
           if (a < ph0 - 0.01) a += Math.PI * 2;
-          const k = lerp(0.8, 1, smoothstep(0, 0.42, Math.min(a - ph0, ph0 + phL - a)));
+          const k = lerp(0.8, 1, THREE.MathUtils.smoothstep(0, 0.42, Math.min(a - ph0, ph0 + phL - a)));
           bp.setXYZ(i, x * k, y, z * k);
         }
         bg.computeVertexNormals();
@@ -575,10 +589,7 @@ export class Person {
     mesh.bind(new THREE.Skeleton(this.bones));
     // 그릴 때: 지난번 그린 뒤로 자세가 안 바뀐 사람은 뼈 행렬 계산과 뼈 텍스처 올리기를 건너뜀 (관객은 초당 20~30번만 움직이고 화면은 60번 그림. 숨겨 둔 사람도 여기서 걸러짐)
     // 주의: 여기서 this는 Person이므로, 원래 함수를 부를 때는 root / skeleton을 명시해서 넘김
-    const self = this,
-      root = this.root,
-      sk = mesh.skeleton,
-      skUpdate = sk.update;
+    const self = this, root = this.root, sk = mesh.skeleton, skUpdate = sk.update;
     this.dirty = true;
     this.skDirty = true;
     root.updateMatrixWorld = (force) => {
@@ -896,6 +907,7 @@ export class Person {
     this.dirty = true;
     this.skDirty = true; // 다음에 그릴 때 행렬·뼈 텍스처를 다시 올림
   }
+
   updateLegs(st, c) {
     const B = this.bones,
       Bn = BONE,
@@ -1075,12 +1087,12 @@ export class Person {
       cb.scale.set(1, 0.25 + open * 0.55, 1);
     }
     // 입 안 어둠: 벌릴 때만 펼쳐짐
-    const gate = smoothstep(0.1, 0.42, open) + 1e-4;
+    const gate = THREE.MathUtils.smoothstep(0.1, 0.42, open) + 1e-4;
     B[Bn.mouthIn].scale.set(1, gate, 1);
     B[Bn.cornerInL].scale.set(1, gate, 1);
     B[Bn.cornerInR].scale.set(1, gate, 1);
     // 윗니는 입천장에, 혀는 아랫입술 쪽에
-    const tk = smoothstep(0.16, 0.5, open) + 1e-4,
+    const tk = THREE.MathUtils.smoothstep(0.16, 0.5, open) + 1e-4,
       inH = hh * 0.8 * gate,
       sinT = Math.sin(tilt - 0.1);
     const tb = B[Bn.teeth],
@@ -1088,7 +1100,7 @@ export class Person {
       wx = 1 + wd * 0.3;
     tb.position.set(0, cy + inH - R * 0.05 * tk * 0.9, mp.z + drop * 0.06 + inH * sinT);
     tb.scale.set(wx * tk, tk, tk);
-    const tgk = smoothstep(0.35, 0.9, open) + 1e-4;
+    const tgk = THREE.MathUtils.smoothstep(0.35, 0.9, open) + 1e-4;
     tg.position.set(0, cy - inH + R * 0.075 * tgk * 0.75, mp.z + drop * 0.06 - inH * sinT);
     tg.scale.set(wx * tgk, tgk, tgk);
     // 턱: 아랫입술을 따라 내려감
