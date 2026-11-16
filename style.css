@@ -392,6 +392,12 @@ button {
   justify-content: center;
 }
 
+.crazy-action {
+  background: var(--mustard);
+  font-weight: 900;
+  justify-content: center;
+}
+
 .meteor-action {
   color: var(--paper);
   background: #4b315a;
