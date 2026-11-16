@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
-import JAZZ_AUDIO from './js/data/audio.js';
 import TUNES from './js/data/tunes.js';
-import { STYLE } from './js/data/data.js';
+import { STYLE, BONE } from './js/data/data.js';
+import { clamp, smooth01, lerp, seeded, rand, pick, randi, rateFor } from './js/utils/math.js';
+import { latheY } from './js/utils/GeomUtils.js';
+import { Person } from './js/objects/person.js';
 
 // ===== 00_util.js =====
 // ===================== 공용 도구 =====================
@@ -244,14 +246,9 @@ function rboxMake(w, h, d, r, seg) {
   g.translate(0, 0, -(d - 2 * bv) / 2);
   return g;
 }
-// 회전체: pts = [[반지름, 높이], ...] (y축 기준)
-function latheY(pts, seg = 24, phiStart = 0, phiLen = Math.PI * 2) {
-  return new THREE.LatheGeometry(pts.map(p => new THREE.Vector2(Math.max(0.0001, p[0]), p[1])), seg, phiStart, phiLen);
-}
 
 function tubeAlong(points, r, seg = 40, rs = 10, closed = false) {
-  const curve = new THREE.CatmullRomCurve3(points.map(p => V3(p[0], p[1], p[2])), closed, 'catmullrom', 0.2);
-  return new THREE.TubeGeometry(curve, seg, r, rs, closed);
+  return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points.map(p => V3(p[0], p[1], p[2])), closed, 'catmullrom', 0.2), seg, r, rs, closed);
 }
 // 빛 번짐 스프라이트 (전구·조명 머리)
 let _glowTex = null;
@@ -678,6 +675,19 @@ function synthApplause(ctx, dur, density) {
   return toBuf(ctx, fL.subarray(0, n - xf), 0.8, fR.subarray(0, n - xf));
 }
 
+function b64ToAB(s) {
+  const bin = atob(s), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u.buffer;
+}
+
+function decodeAB(ctx, ab) {
+  return new Promise((res, rej) => {
+    const p = ctx.decodeAudioData(ab, res, rej);
+    if (p && p.then) p.then(res, rej);
+  });
+}
+
 function synthRoomTone(ctx) {
   const sr = ctx.sampleRate,
     n = Math.floor(6 * sr);
@@ -909,30 +919,17 @@ const T_TUNE = {
   T88: -11.8
 };
 
-const AUDIO_DIR = 'audio/';
-const AUDIO_EXT = '.mp3'; // change to match your files (.ogg, .wav, .m4a ...)
-
-async function loadAB(key) {
-  const res = await fetch(`${AUDIO_DIR}${encodeURIComponent(key)}${AUDIO_EXT}`);
-  if (!res.ok) throw new Error(`소리 파일을 못 불러왔습니다: ${key} (${res.status})`);
-  return res.arrayBuffer();
-}
-
 async function decodePack(onProgress) {
-  const ctx = createAudio(), P = JAZZ_AUDIO;
-  if (!P || !Array.isArray(P.data)) throw new Error('소리 묶음을 못 불러왔습니다');
-  const keys = P.data;
+  const ctx = createAudio(), P = window.JAZZ_AUDIO;
+  if (!P) throw new Error('소리 묶음을 못 불러왔습니다');
+  const keys = Object.keys(P.meta);
   let done = 0;
   const sets = {};
   const worker = async (key) => {
     const meta = P.meta[key];
-    if (!meta) throw new Error(`meta 정보가 없습니다: ${key}`);
-    const buf = await ctx.decodeAudioData(await loadAB(key));
-    const sr = buf.sampleRate,
-      d0 = buf.getChannelData(0),
-      lim = Math.min(d0.length, Math.floor(0.06 * sr));
-    let pk = 0,
-      pi = 0;
+    const buf = await decodeAB(ctx, b64ToAB(P.data[key]));
+    const sr = buf.sampleRate, d0 = buf.getChannelData(0), lim = Math.min(d0.length, Math.floor(0.06 * sr));
+    let pk = 0, pi = 0;
     for (let i = 0; i < lim; i++) {
       const a = Math.abs(d0[i]);
       if (a > pk) {
@@ -946,14 +943,7 @@ async function decodePack(onProgress) {
       const d = buf.getChannelData(c);
       for (let i = 0; i < clearTo; i++) d[i] = 0;
     }
-    const s = {
-      key,
-      buf,
-      m: meta.m,
-      c: (meta.c || 0) + (T_TUNE[key] || 0),
-      start: clearTo / sr,
-      on: onS / sr
-    };
+    const s = { key, buf, m: meta.m, c: (meta.c || 0) + (T_TUNE[key] || 0), start: clearTo / sr, on: onS / sr };
     if (meta.ls != null) {
       s.ls = onS / sr + meta.ls;
       s.le = onS / sr + meta.le;
@@ -972,16 +962,15 @@ async function decodePack(onProgress) {
     done++;
     onProgress && onProgress(done / keys.length);
   };
-  // 전부 한꺼번에 불러오고 푼다 (네트워크 + 디코딩이 병렬로 진행됨)
+  // 전부 한꺼번에 맡김: 푸는 일 자체는 브라우저가 다른 스레드에서 하므로 무대를 만드는 동안 같이 진행됨
   await Promise.all(keys.map(worker));
-  for (const k in sets)
-    if (Array.isArray(sets[k])) sets[k].sort((a, b) => a.m - b.m || a.rr - b.rr);
+  for (const k in sets) if (Array.isArray(sets[k])) sets[k].sort((a, b) => a.m - b.m || a.rr - b.rr);
   AE.sets = sets;
-  (AE.at || (AE.at = {})).sets = performance.now();
+  (AE.at || (AE.at = {})).sets = performance.now(); // 불러오기 시각 기록 (점검용)
+  // 합성 소리·잔향 (맨 처음부터 따로 만들고 있던 것을 여기서 받음)
   Object.assign(AE.syn, await synthBegin());
   AE.rev.buffer = AE.syn.ir;
-  const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate),
-    nd = nb.getChannelData(0);
+  const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0);
   for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
   AE.noise = nb;
   AE.decoded = true;
@@ -1002,7 +991,6 @@ function nearestSample(set, midi, rr = 0) {
   }
   return best;
 }
-const rateFor = (s, midi, cents = 0) => Math.pow(2, (midi - s.m) / 12 + ((s.c || 0) + cents) / 1200);
 
 const bandVoices = new Set();
 
@@ -5042,61 +5030,6 @@ const FACES = {
 };
 for (const k in FACES) FACES[k] = Object.assign({}, FACE_DEF, FACES[k]);
 const SHOCK_FACES = new Set(['jawdrop', 'disbelief', 'gasp', 'awe', 'wow']);
-const BONE = {
-  root: 0,
-  hips: 1,
-  spine: 2,
-  chest: 3,
-  neck: 4,
-  head: 5,
-  jaw: 6,
-  browL: 7,
-  browR: 8,
-  lidL: 9,
-  lidR: 10,
-  eyeL: 11,
-  eyeR: 12,
-  mouth: 13,
-  cornerL: 14,
-  cornerR: 15,
-  clavL: 16,
-  upperL: 17,
-  foreL: 18,
-  handL: 19,
-  fingL: 20,
-  indexL: 21,
-  thumbL: 22,
-  clavR: 23,
-  upperR: 24,
-  foreR: 25,
-  handR: 26,
-  fingR: 27,
-  indexR: 28,
-  thumbR: 29,
-  thighL: 30,
-  shinL: 31,
-  footL: 32,
-  thighR: 33,
-  shinR: 34,
-  footR: 35,
-  teeth: 36,
-  mouthIn: 37,
-  cornerInL: 38,
-  cornerInR: 39,
-  ballL: 40,
-  ballR: 41,
-  tongue: 42,
-};
-const HAND_POSE = { // [손가락 셋, 검지, 엄지] 굽힘
-  relax: [0.55, 0.45, 0.2],
-  fist: [1.6, 1.55, 0.9],
-  grip: [1.25, 1.15, 0.6],
-  flat: [0.05, 0.02, 0.05],
-  point: [1.6, 0.0, 0.8],
-  pinch: [0.7, 0.9, 0.7],
-  spread: [-0.1, -0.15, -0.3],
-  horn: [1.5, 0.0, 0.6],
-};
 
 // 재질 (모든 사람 공용)
 const PEOPLE_MAT = {};
@@ -5424,16 +5357,6 @@ function nearestPC(pc, near, lo, hi) {
       best = m;
     }
   return best;
-}
-
-function nearestAllowed(raw, ch, key, dir = 1) {
-  raw = Math.round(raw);
-  for (let d = 0; d <= 7; d++) {
-    const c = d === 0 ? [raw] : (dir >= 0 ? [raw + d, raw - d] : [raw - d, raw + d]);
-    for (const m of c)
-      if (inSet(m, ch, key)) return m;
-  }
-  return raw;
 }
 
 function stepAllowed(from, dir, ch, key) {
@@ -14471,7 +14394,7 @@ function initUI() {
     }
   });
   const tryDecode = async () => {
-    if (!JAZZ_AUDIO) return;
+    if (!window.JAZZ_AUDIO) return;
     try {
       createAudio();
       PACK.on = f => {
@@ -18713,7 +18636,7 @@ function bootSoon() {
   };
   try {
     synthBegin(() => setTimeout(go, 0));
-    if (JAZZ_AUDIO) packBegin();
+    if (window.JAZZ_AUDIO) packBegin();
   } catch (e) { console.error(e); }
   setTimeout(go, 400);
 }

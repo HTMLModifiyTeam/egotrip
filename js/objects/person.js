@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { Rig } from './rig.js';
+import { latheY } from '../utils/GeomUtils.js';
+import { HAND_POSE, BONE } from '../data/data.js';
 
 // 좌/우 반복용 상수 (update 안에서 매 프레임 배열을 새로 만들지 않도록)
 const PERSON_SIDES = Object.freeze(['L', 'R']);
@@ -22,20 +24,6 @@ const G = {
   cap: (len, rad, seg = 12) => new THREE.CapsuleGeometry(rad, Math.max(0.001, len - 2 * rad), G.capSeg, seg), // 길이 = 전체 길이, y축
   cyl: (rt, rb, h, seg = 16, open = false) => new THREE.CylinderGeometry(rt, rb, h, seg, 1, open),
   tor: (R, r, seg = 24, rs = 8, arc = Math.PI * 2) => new THREE.TorusGeometry(R, r, rs, seg, arc),
-};
-
-const torsoW = p => {
-  const y = p.y;
-  if (y < spY) {
-    const t = THREE.MathUtils.smoothstep(hipY - 0.02, spY, y);
-    return [[Bn.hips, 1 - t], [Bn.spine, t]];
-  }
-  if (y < chY) {
-    const t = THREE.MathUtils.smoothstep(spY, chY + 0.02, y);
-    return [[Bn.spine, 1 - t], [Bn.chest, t]];
-  }
-  const t = THREE.MathUtils.smoothstep(nkY - 0.03, nkY + 0.03, y);
-  return [[Bn.chest, 1 - t], [Bn.neck, t]];
 };
 
 const _pv1 = new THREE.Vector3(), _pv2 = new THREE.Vector3(), _pv3 = new THREE.Vector3(), _pv4 = new THREE.Vector3(), _pv5 = new THREE.Vector3();
@@ -265,6 +253,19 @@ export class Person {
       spY = this.restW[Bn.spine].y,
       chY = this.restW[Bn.chest].y,
       nkY = this.restW[Bn.neck].y;
+    const torsoW = p => {
+      const y = p.y;
+      if (y < spY) {
+        const t = THREE.MathUtils.smoothstep(hipY - 0.02, spY, y);
+        return [[Bn.hips, 1 - t], [Bn.spine, t]];
+      }
+      if (y < chY) {
+        const t = THREE.MathUtils.smoothstep(spY, chY + 0.02, y);
+        return [[Bn.spine, 1 - t], [Bn.chest, t]];
+      }
+      const t = THREE.MathUtils.smoothstep(nkY - 0.03, nkY + 0.03, y);
+      return [[Bn.chest, 1 - t], [Bn.neck, t]];
+    };
     // 몸통 가중치: 엉덩이↔허리↔가슴 부드럽게
 
     // 몸통 회전체 (단면 타원): 엉덩이-허리-가슴-어깨
@@ -292,10 +293,8 @@ export class Person {
     // 몸통 겉에 붙는 무늬 (외곽선 없는 3번 그룹)
     const profR = y => {
       for (let i = 1; i < prof.length; i++)
-        if (y <= prof[i][1]) {
-          const t = (y - prof[i - 1][1]) / (prof[i][1] - prof[i - 1][1]);
-          return lerp(prof[i - 1][0], prof[i][0], t);
-        } return 0.001;
+        if (y <= prof[i][1]) return lerp(prof[i - 1][0], prof[i][0], (y - prof[i - 1][1]) / (prof[i][1] - prof[i - 1][1]));
+      return 0.001;
     };
     const band = (y0, y1, color, off = 0.006, arc = null) => {
       const pts = [];
@@ -311,8 +310,7 @@ export class Person {
       for (let y = hipY + 0.02 * h; y < nkY - 0.1 * h; y += 0.075 * h) band(y, y + 0.032 * h, stripe);
     if (jacketed) {
       // 셔츠 V자 + 넥타이
-      const vTop = nkY - 0.02 * h,
-        vBot = chY - 0.06 * h;
+      const vTop = nkY - 0.02 * h, vBot = chY - 0.06 * h;
       const vs = new THREE.BufferGeometry();
       const vz = (y, x) => Math.sqrt(Math.max(0, 1 - Math.pow(x / (profR(y) + 0.008), 2))) * (profR(y) + 0.008) * 0.72 + 0.001;
       const pos = [],
@@ -1019,19 +1017,12 @@ export class Person {
     bone.quaternion.copy(K.qp.invert().multiply(K.qw));
   }
   updateFace(t) {
-    const B = this.bones,
-      Bn = BONE,
-      f = this.face,
-      R = this.R,
-      hw = this.restW[Bn.head];
+    const B = this.bones, Bn = BONE, f = this.face, R = this.R, hw = this.restW[Bn.head];
     const pop = clamp(f.pop, 0.9, 1.3);
     // 눈썹: 놀라면 이마 끝까지 치켜올라감, skew는 한쪽만
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1,
-        b = B[Bn['brow' + s]],
-        r0 = this.restW[Bn['brow' + s]];
-      const up = f.brow + sx * f.skew * 0.6,
-        low = sx * f.skew < 0;
+      const sx = s === 'L' ? 1 : -1, b = B[Bn['brow' + s]], r0 = this.restW[Bn['brow' + s]];
+      const up = f.brow + sx * f.skew * 0.6, low = sx * f.skew < 0;
       b.position.set(r0.x - hw.x, r0.y - hw.y + up * R * 0.12 + (pop - 1) * R * 0.5, r0.z - hw.z + (pop - 1) * R * 0.12);
       b.rotation.set(0, 0, -sx * (f.browIn - (low ? Math.abs(f.skew) * 0.9 : 0)) * 0.3);
     }
@@ -1051,8 +1042,7 @@ export class Person {
     const d = _pv2.copy(this.c.look).sub(ep);
     _pq1.setFromRotationMatrix(hb.matrixWorld).invert();
     d.applyQuaternion(_pq1);
-    let ey = clamp(Math.atan2(d.x, d.z), -0.5, 0.5),
-      epc = clamp(-Math.atan2(d.y, Math.hypot(d.x, d.z)), -0.35, 0.3);
+    let ey = clamp(Math.atan2(d.x, d.z), -0.5, 0.5), epc = clamp(-Math.atan2(d.y, Math.hypot(d.x, d.z)), -0.35, 0.3);
     // 동공지진: 기가 막힐 때 눈동자가 잘게 떨림
     const quake = clamp((0.8 - f.pupil) / 0.3, 0, 1);
     if (quake > 0.05) {
@@ -1066,23 +1056,15 @@ export class Person {
       eb.scale.set(ps, ps, pop);
     }
     // 입: 윗입술 자리는 그대로 두고 아래로 벌어짐 (턱이 같이 떨어짐)
-    const mp = this.mouthP,
-      open = clamp(f.open, 0, 2),
-      wd = f.width,
-      sm = f.smile;
-    const sy = 0.12 + open,
-      hh0 = R * 0.16 * 0.12,
-      hh = R * 0.16 * sy,
-      drop = hh - hh0,
-      cy = mp.y - drop;
+    const mp = this.mouthP, open = clamp(f.open, 0, 2), wd = f.width, sm = f.smile;
+    const sy = 0.12 + open, hh0 = R * 0.16 * 0.12, hh = R * 0.16 * sy, drop = hh - hh0, cy = mp.y - drop;
     const tilt = 0.1 + drop / R * 0.55; // 크게 벌릴수록 아랫입술이 얼굴 곡면을 따라 뒤로
     const mb = B[Bn.mouth];
     mb.position.set(0, cy, mp.z + drop * 0.06);
     mb.rotation.set(tilt - 0.1, 0, 0);
     mb.scale.set(1 + wd * 0.35, sy, 1);
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1,
-        cb = B[Bn['corner' + s]];
+      const sx = s === 'L' ? 1 : -1, cb = B[Bn['corner' + s]];
       cb.position.set(sx * mp.w * (1 + wd * 0.45 - open * 0.07), cy + sm * R * 0.11, mp.z - R * 0.04 - drop * 0.12);
       cb.scale.set(1, 0.25 + open * 0.55, 1);
     }

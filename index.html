@@ -119,6 +119,7 @@
         <p class="credit">소리: VSCO 2 Community Edition (CC0), Sonatina Symphonic Orchestra (CC Sampling+ 1.0)</p>
       </div>
     </div>
+
     <div id="gameOver" class="screen hide" aria-live="assertive">
       <div class="game-over-card"><div class="game-over-eyebrow">THE CROWD GOT YOU</div><div class="game-over-title">GAME OVER</div><button id="gameOverHome" class="pill go">처음으로</button></div>
     </div>
@@ -126,14 +127,13 @@
       (function () {
         const audiopackEvt = new Event('audiopack');
         var s = document.createElement('script');
-        s.src = 'js/data/audio.js';
-        s.type = 'module';
+        s.src = 'https://raw.githubusercontent.com/aaffffffffff123-lang/egotrip/refs/heads/main/audio.js';
         s.async = true;
-        s.onload = function () {
+        s.onload = () => {
           window.__audioReady = true;
           window.dispatchEvent(audiopackEvt);
         };
-        s.onerror = function () {
+        s.onerror = () => {
           window.__audioFailed = true;
           window.dispatchEvent(audiopackEvt);
         };

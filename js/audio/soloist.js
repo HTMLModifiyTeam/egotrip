@@ -29,8 +29,7 @@ class Soloist {
 
   I(B) {
     if (this.fixedI != null) return this.fixedI;
-    const x = this.x(B),
-      pk = 0.8;
+    const x = this.x(B), pk = 0.8;
     return clamp(x < pk ? 0.2 + 0.8 * Math.pow(smooth01(x / pk), 1.1) : 1 - 0.42 * smooth01((x - pk) / (1 - pk)), 0, 1);
   }
   top(I) {

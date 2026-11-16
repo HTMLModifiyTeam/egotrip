@@ -1,13 +1,11 @@
 import * as THREE from 'three';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
-// 그룹 번호: 몸(외곽선 있음) / 얼굴 / 장식(외곽선 없음)
-const GROUP_COUNT = 3;
 const MAX_INFLUENCES = 4; // 정점 하나에 영향을 주는 뼈 최대 개수 (스키닝 셰이더 한계)
 
 export class Rig {
   constructor() {
-    this.parts = Array.from({ length: GROUP_COUNT }, () => []);
+    this.parts = Array.from({ length: 3 }, () => []);
     this.groupsUsed = [false, false, false];
   }
   /**
@@ -25,6 +23,7 @@ export class Rig {
     // 곁가지 속성(uv 등)이 남아 있으면 정점이 덜 합쳐지므로 합치기 전에 먼저 지움
     for (const k of Object.keys(geo.attributes))
       if (k !== 'position' && k !== 'normal') geo.deleteAttribute(k);
+
     const g = geo.index ? geo : mergeVertices(geo);
     if (m) g.applyMatrix4(m);
     if (!g.attributes.normal) g.computeVertexNormals();
