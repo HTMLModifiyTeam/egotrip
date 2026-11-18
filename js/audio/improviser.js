@@ -1,4 +1,6 @@
 import { mod12, clamp, nearestAllowed } from "../utils/Math.js";
+import { chordAt } from "../utils/Sound.js";
+import { randi } from "../utils/Random.js";
 
 const EPS = 1e-6;
 const snapHalf = x => Math.round(x * 2) / 2; // 8분음표 격자로 맞춤

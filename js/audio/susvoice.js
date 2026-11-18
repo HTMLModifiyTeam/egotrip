@@ -1,5 +1,6 @@
 import { rateFor } from '../utils/Math.js';
 import { rand } from '../utils/Random.js';
+import { dynGain, dynCut } from '../utils/Sound.js';
 import { trackBandVoice } from '../audio/BandVoice.js';
 
 const TC = 2.5; // 'time'(대략 도달 시간) → setTargetAtTime 시정수 변환 계수
@@ -167,8 +168,12 @@ export class SusVoice {
       } catch { }
     }
     if (!held) {
-      g.cancelScheduledValues(when);
-      g.setValueAtTime(when < this.t0 + 0.01 ? this.level * 0.5 : this.level, when);
+      if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(when);
+      else {
+        const value = g.value;
+        g.cancelScheduledValues(when);
+        g.setValueAtTime(value, when);
+      }
     }
     g.setTargetAtTime(0, when, time / 3);
     try {

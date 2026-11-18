@@ -90,3 +90,8 @@ export const NOW = {
   last: 0,
   frame: 0
 };
+
+export let PEOPLE = {
+  all: [],
+  drawing: false
+};

@@ -1,4 +1,5 @@
 import { mod12, nearestAllowed } from "../utils/Math.js";
+import { inSet, isChordTone, isGuide } from "../utils/Harmony.js";
 
 export class Soloist {
   constructor(audio, o) {

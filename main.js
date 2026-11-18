@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 import TUNES from './js/data/tunes.js';
-import { STYLE, BONE, NOW } from './js/data/data.js';
-import { FACES, FACE_DEF } from './js/data/faces.js';
+import { STYLE, BONE, NOW, PEOPLE } from './js/data/data.js';
+import { FACES, FACE_DEF, PEOPLE_MAT, SHOCK_FACES } from './js/data/faces.js';
+import { PC, QUAL } from "./js/data/harmony.js";
 import { Soloist } from './js/audio/soloist.js';
 import { SusVoice } from './js/audio/susvoice.js';
 import { Improviser } from './js/audio/improviser.js';
@@ -11,6 +12,8 @@ import { stopBandVoices, trackBandVoice } from './js/audio/BandVoice.js';
 import { latheY } from './js/utils/GeomUtils.js';
 import { clamp, smooth01, lerp, rateFor, damp, mod12, smoothstep, nearestAllowed, dampAngle } from './js/utils/Math.js';
 import { seeded, rand, pick, randi, shuffle } from './js/utils/Random.js';
+import { levelFor, dynGain, dynCut, chordAt } from './js/utils/Sound.js';
+import { parseChord, parseForm, inSet, isChordTone, isGuide } from './js/utils/Harmony.js';
 import { Person } from './js/objects/person.js';
 import { M4, V3 } from './js/utils/Vector.js';
 
@@ -20,7 +23,6 @@ import { M4, V3 } from './js/utils/Vector.js';
 // - 사람·가구·벽: toonMat / toonVC (단계 음영)
 // - 금속(놋쇠·크롬·심벌): metalMat (환경 반사) — 외곽선은 똑같이 붙음
 // - 외곽선: OutlineEffect가 재질의 userData.outlineParameters를 읽음 (outline() 도우미)
-
 function makeGradient(stops) {
   const n = stops.length, data = new Uint8Array(n * 4);
   for (let i = 0; i < n; i++) {
@@ -864,12 +866,8 @@ function synthBegin(onStart) {
         fallback();
       };
       timer = setTimeout(fallback, 45000);
-      w.postMessage({
-        sr
-      });
-    } catch (e) {
-      fallback();
-    }
+      w.postMessage({ sr });
+    } catch { fallback(); }
   });
   return AE.synP;
 }
@@ -957,6 +955,7 @@ async function decodePack(onProgress) {
   const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0);
   for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
   AE.noise = nb;
+  await prepareCrowdFx();
   AE.decoded = true;
 }
 
@@ -1029,15 +1028,14 @@ function playOne(sample, midi, when, vel, dest, o = {}) {
 }
 
 function playBuf(buf, when, vel, dest, o = {}) {
-  const ctx = AE.ctx,
-    src = ctx.createBufferSource();
+  const ctx = AE.ctx, src = ctx.createBufferSource();
   src.buffer = buf;
   if (o.rate) src.playbackRate.value = o.rate;
   const g = ctx.createGain();
   g.gain.value = vel;
   src.connect(g);
   let out = g;
-  if (o.pan && ctx.createStereoPanner) {
+  if ((o.pan || o.centerPan) && ctx.createStereoPanner) {
     const p = ctx.createStereoPanner();
     p.pan.value = clamp(o.pan, -1, 1);
     g.connect(p);
@@ -1082,6 +1080,7 @@ const BED = {};
 
 function startBeds() {
   const ctx = AE.ctx;
+  if (BED.room) return;
   const mk = (buf, dest, gain) => {
     const src = ctx.createBufferSource();
     src.buffer = buf;
@@ -1091,10 +1090,7 @@ function startBeds() {
     src.connect(g);
     g.connect(dest);
     src.start();
-    return {
-      src,
-      g
-    };
+    return { src, g };
   };
   BED.room = mk(AE.syn.room, AE.buses.room, 0.05);
   BED.applause = mk(AE.syn.applause, AE.buses.crowd, 0);
@@ -1104,10 +1100,125 @@ function startBeds() {
 }
 
 function setBed(name, v, time = 0.6) {
-  const b = BED[name];
-  if (b) b.g.gain.setTargetAtTime(v, AE.ctx.currentTime, time / 3);
+  const b = BED[name]; if (!b || !AE.ctx) return;
+  const now = AE.ctx.currentTime, tau = time / 3;
+  if (Math.abs(v) < 0.0001) v = 0;
+  if (b.target != null && (v === b.target || (v !== 0 && Math.abs(b.target - v) < 0.001)) && b.tau === tau) return;
+  b.target = v; b.tau = tau;
+  const gain = b.g.gain;
+  if (gain.cancelAndHoldAtTime) gain.cancelAndHoldAtTime(now);
+  else { const value = gain.value; gain.cancelScheduledValues(now); gain.setValueAtTime(value, now); }
+  gain.setTargetAtTime(v, now, tau);
 }
 
+
+// Render the existing procedural crowd sounds once, before play. A reaction then
+// needs one buffer voice instead of hundreds of live oscillators and formants.
+// Keep multiple independently randomized takes, stereo placement and the same mix.
+const CROWD_AUDIO = { baking: false, bank: new Map(), live: new Set(), graphs: new Set() };
+function fxGraph() {
+  const nodes = [], sources = []; let pending = 0;
+  const graph = {
+    own(node) {
+      nodes.push(node);
+      if (typeof node.start === 'function') {
+        sources.push(node); pending++;
+        node.addEventListener('ended', () => { if (--pending === 0) cleanup(); }, { once: true });
+      }
+      return node;
+    },
+    stop() {
+      for (const node of sources) { try { node.stop(); } catch { } }
+      cleanup();
+    }
+  };
+  function cleanup() {
+    for (const node of nodes) try { node.disconnect(); } catch { }
+    CROWD_AUDIO.graphs.delete(graph);
+  }
+  if (!CROWD_AUDIO.baking) CROWD_AUDIO.graphs.add(graph);
+  return graph;
+}
+
+function playBakedFx(key, when, vol = 1, pan = 0) {
+  if (CROWD_AUDIO.baking) return false;
+  const takes = CROWD_AUDIO.bank.get(key);
+  if (!takes || !AE.ctx) return false;
+  if (when < AE.ctx.currentTime - 0.25) return true;
+  const take = pick(takes), voice = playBuf(take, Math.max(when, AE.ctx.currentTime + 0.004), vol, AE.buses.cheer, { pan, centerPan: take.numberOfChannels === 1, offset: 0.02 });
+  CROWD_AUDIO.live.add(voice);
+  voice.src.addEventListener('ended', () => CROWD_AUDIO.live.delete(voice), { once: true });
+  return true;
+}
+
+function bakedCall(type, when, o, defaultVol, kinds) {
+  if (CROWD_AUDIO.baking || !CROWD_AUDIO.bank.size) return false;
+  // Explicit pitch, gender or duration requests still use the original synth.
+  if (Object.keys(o).some(k => !['vol', 'pan', 'kind'].includes(k))) return false;
+  const key = kinds ? type + ':' + (o.kind || pick(kinds)) : type;
+  return playBakedFx(key, when, o.vol || defaultVol, o.pan != null ? o.pan : rand(-0.8, 0.8));
+}
+
+async function prepareCrowdFx() {
+  const Offline = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!Offline || CROWD_AUDIO.bank.size) return;
+  const jobs = [];
+  const add = (key, seconds, channels, count, fn) => { for (let i = 0; i < count; i++) jobs.push({ key, seconds, channels, fn }); };
+  for (const kind of ['woo', 'hoo', 'ahh', 'yow']) add('whoop:' + kind, 1.6, 1, 4, t => whoop(t, { kind, vol: 1, pan: 0 }));
+  for (const kind of ['up', 'wolf', 'trill']) add('whistle:' + kind, 1.3, 1, 3, t => whistleCall(t, { kind, vol: 1, pan: 0 }));
+  add('scream', 1.6, 1, 4, t => scream(t, { vol: 1, pan: 0 }));
+  add('laugh', 2.0, 1, 4, t => laugh(t, { vol: 1, pan: 0 }));
+  for (const n of [26, 30]) add('gasp:' + n, 0.8, 2, 2, t => crowdGasp(t, n));
+  for (const [n, dur] of [[14, 1.4], [16, 1.7]]) add('ooh:' + n + ':' + dur, dur * 1.15 + 0.4, 2, 2, t => crowdOoh(t, n, 1, dur));
+  for (const n of [24, 28]) add('exhale:' + n, 3.3, 2, 2, t => crowdExhale(t, n));
+  add('hey', 0.4, 2, 4, t => heyShout(t));
+  for (const job of jobs) {
+    // One offline renderer at a time, with a yield between takes. No work is
+    // added to the real-time context and the UI can still update loading state.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    try {
+      const saved = { ctx: AE.ctx, buses: AE.buses, busy: VJOB.busy };
+      const ctx = new Offline(job.channels, Math.ceil((job.seconds + 0.02) * saved.ctx.sampleRate), saved.ctx.sampleRate);
+      CROWD_AUDIO.baking = true;
+      AE.ctx = ctx;
+      AE.buses = { cheer: ctx.destination, crowd: ctx.destination };
+      VJOB.busy = true;
+      try { 
+        job.fn(0.02);
+      } finally {
+        AE.ctx = saved.ctx
+        AE.buses = saved.buses;
+        VJOB.busy = saved.busy;
+        CROWD_AUDIO.baking = false;
+      }
+      const buf = await ctx.startRendering();
+      // A centered panner downmixes to mono at -3 dB offline. Undo that once;
+      // playBuf applies the normal mono panner again at the requested position.
+      if (job.channels === 1) {
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] *= Math.SQRT2;
+      }
+      const takes = CROWD_AUDIO.bank.get(job.key) || [];
+      takes.push(buf);
+      CROWD_AUDIO.bank.set(job.key, takes);
+    } catch (e) { console.warn('Crowd sample preparation failed; using live synthesis', job.key, e); }
+  }
+}
+
+function resetCrowdAudio() {
+  VJOB.q.length = 0;
+  if (VJOB.timer != null) clearTimeout(VJOB.timer);
+  VJOB.timer = null;
+  const now = AE.ctx.currentTime;
+  for (const voice of CROWD_AUDIO.live) {
+    const g = voice.g.gain;
+    if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(now);
+    g.linearRampToValueAtTime(0, now + 0.02);
+    try { voice.src.stop(now + 0.025); } catch { }
+  }
+  CROWD_AUDIO.live.clear();
+  for (const graph of CROWD_AUDIO.graphs) graph.stop();
+}
 
 // ===================== 관객 목소리 (말 없는 환호) =====================
 // 수십 명이 "아아아—" 하는 함성 바탕: 모음 포먼트를 통과한 소음 + 음높이 있는 목소리 몇 겹, 끝을 이어 붙여 반복
@@ -1189,10 +1300,7 @@ function synthRoar(ctx, dur) {
 }
 
 function synthStomp(ctx) {
-  const sr = ctx.sampleRate,
-    n = Math.floor(0.35 * sr),
-    x = new Float32Array(n),
-    nz = filt(noiseArr(n), 'lp', 600, 0.7, sr);
+  const sr = ctx.sampleRate, n = Math.floor(0.35 * sr), x = new Float32Array(n), nz = filt(noiseArr(n), 'lp', 600, 0.7, sr);
   for (let i = 0; i < n; i++) {
     const t = i / sr;
     x[i] = Math.sin(2 * Math.PI * (70 + 40 * Math.exp(-t * 30)) * t) * Math.exp(-t * 14) + nz[i] * Math.exp(-t * 30) * 0.8;
@@ -1253,6 +1361,7 @@ function vjobTick() {
       if (q[0].when > AE.ctx.currentTime + VJOB.look) break;
       const j = q.shift();
       made++;
+      if (j.when < AE.ctx.currentTime - 0.25) continue;
       j.fn(Math.max(j.when, AE.ctx.currentTime + 0.004), j.o);
     }
   } finally {
@@ -1271,13 +1380,15 @@ const VOWEL = {
 };
 
 function whoop(when, o = {}) {
+  if (bakedCall('whoop', when, o, 0.22, ['woo', 'woo', 'hoo', 'ahh', 'yow'])) return;
   const ctx = AE.ctx;
   if (!ctx || vjob(when, whoop, o)) return;
+  const fx = fxGraph();
   const fem = o.fem != null ? o.fem : Math.random() < 0.5;
   const f0 = o.f0 || (fem ? rand(330, 520) : rand(170, 290));
   const kind = o.kind || pick(['woo', 'woo', 'hoo', 'ahh', 'yow']);
   const dur = o.dur || (kind === 'ahh' ? rand(0.7, 1.4) : rand(0.45, 0.9));
-  const osc = ctx.createOscillator();
+  const osc = fx.own(ctx.createOscillator());
   osc.type = 'sawtooth';
   const fr = osc.frequency;
   // 음높이 곡선
@@ -1295,45 +1406,45 @@ function whoop(when, o = {}) {
     fr.exponentialRampToValueAtTime(f0 * 0.85, when + dur);
   }
   // 떨림
-  const lfo = ctx.createOscillator();
+  const lfo = fx.own(ctx.createOscillator());
   lfo.frequency.value = rand(5, 7);
-  const lg = ctx.createGain();
+  const lg = fx.own(ctx.createGain());
   lg.gain.value = f0 * 0.025;
   lfo.connect(lg);
   lg.connect(fr);
-  const g = ctx.createGain();
+  const g = fx.own(ctx.createGain());
   g.gain.setValueAtTime(0, when);
   const vol = (o.vol || 0.22) * rand(0.6, 1);
   g.gain.linearRampToValueAtTime(vol, when + 0.04);
   g.gain.setValueAtTime(vol, when + dur * 0.6);
   g.gain.exponentialRampToValueAtTime(0.001, when + dur);
-  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const pan = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null;
   if (pan) pan.pan.value = o.pan != null ? o.pan : rand(-0.85, 0.85);
-  const out = ctx.createGain();
+  const out = fx.own(ctx.createGain());
   out.gain.value = 1;
   const v0 = VOWEL[kind === 'woo' ? 'u' : kind === 'hoo' ? 'o' : kind === 'yow' ? 'ae' : 'a'],
     v1 = VOWEL[kind === 'woo' ? 'o' : kind === 'yow' ? 'o' : kind === 'hoo' ? 'u' : 'a'];
   const shift = fem ? 1.12 : 1;
   for (let k = 0; k < 3; k++) {
-    const bp = ctx.createBiquadFilter();
+    const bp = fx.own(ctx.createBiquadFilter());
     bp.type = 'bandpass';
     bp.Q.value = [5, 7, 9][k];
     bp.frequency.setValueAtTime(v0[k] * shift, when);
     bp.frequency.linearRampToValueAtTime(v1[k] * shift, when + dur * 0.7);
-    const fg = ctx.createGain();
+    const fg = fx.own(ctx.createGain());
     fg.gain.value = [1.6, 1.0, 0.5][k];
     osc.connect(bp);
     bp.connect(fg);
     fg.connect(g);
   }
   // 숨소리
-  const ns = ctx.createBufferSource();
+  const ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
-  const nb = ctx.createBiquadFilter();
+  const nb = fx.own(ctx.createBiquadFilter());
   nb.type = 'bandpass';
   nb.frequency.value = v0[1] * shift;
   nb.Q.value = 1.5;
-  const ng = ctx.createGain();
+  const ng = fx.own(ctx.createGain());
   ng.gain.value = 0.35;
   ns.connect(nb);
   nb.connect(ng);
@@ -1351,15 +1462,18 @@ function whoop(when, o = {}) {
   lfo.stop(end);
   ns.stop(end);
 }
+
 // 손가락 휘파람: 높은 사인 + 숨소리, 위로 쭉 올렸다 꺾임
 function whistleCall(when, o = {}) {
+  if (bakedCall('whistle', when, o, 0.07, ['up', 'wolf', 'trill'])) return;
   const ctx = AE.ctx;
   if (!ctx || vjob(when, whistleCall, o)) return;
+  const fx = fxGraph();
   const f = o.f || rand(1900, 2700),
     kind = o.kind || pick(['up', 'wolf', 'trill']);
-  const osc = ctx.createOscillator();
+  const osc = fx.own(ctx.createOscillator());
   osc.type = 'sine';
-  const g = ctx.createGain();
+  const g = fx.own(ctx.createGain());
   g.gain.setValueAtTime(0, when);
   const fr = osc.frequency,
     vol = (o.vol || 0.07) * rand(0.7, 1);
@@ -1393,19 +1507,19 @@ function whistleCall(when, o = {}) {
     g.gain.setValueAtTime(vol, when + 0.6);
     g.gain.linearRampToValueAtTime(0, when + dur);
   }
-  const ns = ctx.createBufferSource();
+  const ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
-  const nb = ctx.createBiquadFilter();
+  const nb = fx.own(ctx.createBiquadFilter());
   nb.type = 'bandpass';
   nb.frequency.value = f;
   nb.Q.value = 6;
-  const ng = ctx.createGain();
+  const ng = fx.own(ctx.createGain());
   ng.gain.value = 0.25;
   ns.connect(nb);
   nb.connect(ng);
   ng.connect(g);
   osc.connect(g);
-  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const pan = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null;
   if (pan) {
     pan.pan.value = o.pan != null ? o.pan : rand(-0.8, 0.8);
     g.connect(pan);
@@ -1422,24 +1536,25 @@ function whistleCall(when, o = {}) {
 function voiceBlip(when, o) {
   const ctx = AE.ctx;
   if (!ctx || !AE.noise || vjob(when, voiceBlip, o)) return;
+  const fx = fxGraph();
   const dur = o.dur,
     f0 = o.f0,
     v0 = o.v0 || VOWEL.a,
     v1 = o.v1 || v0,
     sh = o.fem ? 1.12 : 1;
-  const osc = ctx.createOscillator();
+  const osc = fx.own(ctx.createOscillator());
   osc.type = 'sawtooth';
   const fr = osc.frequency;
   fr.setValueAtTime(f0 * (o.curve ? o.curve[0][1] : 1), when);
   if (o.curve)
     for (const [k, m] of o.curve.slice(1)) fr.exponentialRampToValueAtTime(Math.max(30, f0 * m), when + dur * k);
-  const lfo = ctx.createOscillator();
+  const lfo = fx.own(ctx.createOscillator());
   lfo.frequency.value = o.vibRate || rand(5, 6.8);
-  const lg = ctx.createGain();
+  const lg = fx.own(ctx.createGain());
   lg.gain.value = f0 * (o.vib == null ? 0.025 : o.vib);
   lfo.connect(lg);
   lg.connect(fr);
-  const g = ctx.createGain();
+  const g = fx.own(ctx.createGain());
   g.gain.setValueAtTime(0, when);
   const vol = o.vol,
     att = o.att || 0.04;
@@ -1449,11 +1564,11 @@ function voiceBlip(when, o) {
   // 거친 떨림 (비명): 진폭을 빠르게 흔듦
   let amIn = g;
   if (o.rough) {
-    const am = ctx.createGain();
+    const am = fx.own(ctx.createGain());
     am.gain.value = 1 - o.rough * 0.5;
-    const r = ctx.createOscillator();
+    const r = fx.own(ctx.createOscillator());
     r.frequency.value = rand(24, 36);
-    const rg = ctx.createGain();
+    const rg = fx.own(ctx.createGain());
     rg.gain.value = o.rough * 0.5;
     r.connect(rg);
     rg.connect(am.gain);
@@ -1463,29 +1578,29 @@ function voiceBlip(when, o) {
     amIn = am;
   }
   for (let k = 0; k < 3; k++) {
-    const bp = ctx.createBiquadFilter();
+    const bp = fx.own(ctx.createBiquadFilter());
     bp.type = 'bandpass';
     bp.Q.value = (o.q || [5, 7, 9])[k];
     bp.frequency.setValueAtTime(v0[k] * sh, when);
     bp.frequency.linearRampToValueAtTime(v1[k] * sh, when + dur * 0.75);
-    const fg = ctx.createGain();
+    const fg = fx.own(ctx.createGain());
     fg.gain.value = [1.6, 1.0, 0.5][k];
     osc.connect(bp);
     bp.connect(fg);
     fg.connect(amIn);
   }
-  const ns = ctx.createBufferSource();
+  const ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
-  const nb = ctx.createBiquadFilter();
+  const nb = fx.own(ctx.createBiquadFilter());
   nb.type = 'bandpass';
   nb.frequency.value = v0[1] * sh;
   nb.Q.value = 1.2;
-  const ng = ctx.createGain();
+  const ng = fx.own(ctx.createGain());
   ng.gain.value = o.breath == null ? 0.35 : o.breath;
   ns.connect(nb);
   nb.connect(ng);
   ng.connect(amIn);
-  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const pan = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null;
   if (pan) {
     pan.pan.value = clamp(o.pan != null ? o.pan : rand(-0.85, 0.85), -1, 1);
     g.connect(pan);
@@ -1503,18 +1618,19 @@ function voiceBlip(when, o) {
 function breathBlip(when, o) {
   const ctx = AE.ctx;
   if (!ctx || !AE.noise || vjob(when, breathBlip, o)) return;
+  const fx = fxGraph();
   const dur = o.dur,
-    ns = ctx.createBufferSource();
+    ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
-  const bp = ctx.createBiquadFilter();
+  const bp = fx.own(ctx.createBiquadFilter());
   bp.type = 'bandpass';
   bp.Q.value = o.q || 2.2;
   bp.frequency.setValueAtTime(o.f0, when);
   bp.frequency.exponentialRampToValueAtTime(o.f1, when + dur);
-  const hp = ctx.createBiquadFilter();
+  const hp = fx.own(ctx.createBiquadFilter());
   hp.type = 'highpass';
   hp.frequency.value = 280;
-  const g = ctx.createGain();
+  const g = fx.own(ctx.createGain());
   g.gain.setValueAtTime(0, when);
   g.gain.linearRampToValueAtTime(o.vol, when + (o.att || 0.03));
   g.gain.setValueAtTime(o.vol, when + dur * 0.55);
@@ -1522,7 +1638,7 @@ function breathBlip(when, o) {
   ns.connect(bp);
   bp.connect(hp);
   hp.connect(g);
-  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const pan = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null;
   if (pan) {
     pan.pan.value = o.pan != null ? o.pan : rand(-0.9, 0.9);
     g.connect(pan);
@@ -1533,6 +1649,7 @@ function breathBlip(when, o) {
 }
 // 객석 전체가 "헉!" (짧은 들숨 + 몇 명은 목소리 섞인 헉)
 function crowdGasp(when, n = 26, vol = 1) {
+  if (playBakedFx('gasp:' + n, when, vol)) return;
   for (let i = 0; i < n; i++) {
     const t = when + rand(0, 0.16);
     breathBlip(t, {
@@ -1565,10 +1682,9 @@ function crowdGasp(when, n = 26, vol = 1) {
 }
 // 놀라서 치솟는 "오오오—!" (여럿이 같이)
 function crowdOoh(when, n = 16, vol = 1, dur = 1.7) {
+  if (playBakedFx('ooh:' + n + ':' + dur, when, vol)) return;
   for (let i = 0; i < n; i++) {
-    const fem = Math.random() < 0.5,
-      f0 = fem ? rand(250, 380) : rand(130, 200),
-      d = dur * rand(0.8, 1.15);
+    const fem = Math.random() < 0.5, f0 = fem ? rand(250, 380) : rand(130, 200), d = dur * rand(0.8, 1.15);
     voiceBlip(when + rand(0, 0.25), {
       dur: d,
       f0,
@@ -1590,6 +1706,7 @@ function crowdOoh(when, n = 16, vol = 1, dur = 1.7) {
 }
 // 한 사람 비명 (거칠게 떨림)
 function scream(when, o = {}) {
+  if (bakedCall('scream', when, o, 0.2)) return;
   const fem = o.fem != null ? o.fem : Math.random() < 0.55,
     f0 = fem ? rand(560, 780) : rand(300, 430),
     dur = o.dur || rand(0.8, 1.4);
@@ -1617,6 +1734,7 @@ function scream(when, o = {}) {
 }
 // 한 사람 "하하하하"
 function laugh(when, o = {}) {
+  if (bakedCall('laugh', when, o, 0.12)) return;
   const fem = o.fem != null ? o.fem : Math.random() < 0.5,
     f0 = fem ? rand(280, 380) : rand(140, 210),
     n = randi(4, 7),
@@ -1625,14 +1743,7 @@ function laugh(when, o = {}) {
   for (let i = 0; i < n; i++) {
     const t = when + i / rate,
       k = 1 - i / n * 0.25;
-    breathBlip(t, {
-      dur: 0.06,
-      f0: 1200,
-      f1: 1600,
-      vol: (o.vol || 0.12) * 0.6,
-      pan,
-      att: 0.01
-    });
+    breathBlip(t, { dur: 0.06, f0: 1200, f1: 1600, vol: (o.vol || 0.12) * 0.6, pan, att: 0.01 });
     voiceBlip(t + 0.02, {
       dur: 0.13,
       f0: f0 * k * (i === 0 ? 1.15 : 1),
@@ -1642,10 +1753,7 @@ function laugh(when, o = {}) {
       vol: (o.vol || 0.12) * rand(0.8, 1),
       att: 0.012,
       hold: 0.35,
-      curve: [
-        [0, 1.05],
-        [1, 0.92]
-      ],
+      curve: [[0, 1.05], [1, 0.92]],
       vib: 0,
       breath: 0.45,
       pan
@@ -1654,16 +1762,10 @@ function laugh(when, o = {}) {
 }
 // 참았던 숨을 한꺼번에 "푸하—" + 웃음 몇 개
 function crowdExhale(when, n = 24) {
+  if (playBakedFx('exhale:' + n, when)) return;
   for (let i = 0; i < n; i++) {
     const t = when + rand(0, 0.2);
-    breathBlip(t, {
-      dur: rand(0.45, 0.75),
-      f0: rand(1300, 1800),
-      f1: rand(380, 600),
-      q: rand(1.2, 2),
-      vol: rand(0.06, 0.12),
-      att: 0.02
-    });
+    breathBlip(t, { dur: rand(0.45, 0.75), f0: rand(1300, 1800), f1: rand(380, 600), q: rand(1.2, 2), vol: rand(0.06, 0.12), att: 0.02 });
     if (Math.random() < 0.35) {
       const fem = Math.random() < 0.5;
       voiceBlip(t + 0.05, {
@@ -1675,10 +1777,7 @@ function crowdExhale(when, n = 24) {
         vol: rand(0.04, 0.08),
         att: 0.02,
         hold: 0.3,
-        curve: [
-          [0, 1.2],
-          [1, 0.75]
-        ],
+        curve: [[0, 1.2], [1, 0.75]],
         breath: 0.8
       });
     }
@@ -1691,22 +1790,22 @@ function crowdExhale(when, n = 24) {
 function glassCrash(when, o = {}) {
   const ctx = AE.ctx;
   if (!ctx || !AE.noise) return;
+  const fx = fxGraph();
   const bus = AE.buses.crowd,
     vol = o.vol || 0.5;
-  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null,
-    out = ctx.createGain();
+  const pan = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null, out = fx.own(ctx.createGain());
   out.gain.value = vol;
   if (pan) {
     pan.pan.value = o.pan || 0;
     out.connect(pan);
     pan.connect(bus);
   } else out.connect(bus);
-  const ns = ctx.createBufferSource();
+  const ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
-  const hp = ctx.createBiquadFilter();
+  const hp = fx.own(ctx.createBiquadFilter());
   hp.type = 'highpass';
   hp.frequency.value = 2400;
-  const ng = ctx.createGain();
+  const ng = fx.own(ctx.createGain());
   ng.gain.setValueAtTime(0.9, when);
   ng.gain.exponentialRampToValueAtTime(0.001, when + 0.32);
   ns.connect(hp);
@@ -1717,10 +1816,10 @@ function glassCrash(when, o = {}) {
   for (let i = 0; i < 12; i++) {
     const t = when + rand(0, 0.12) + (i > 8 ? rand(0.12, 0.35) : 0),
       f = rand(2600, 8500);
-    const o2 = ctx.createOscillator();
+    const o2 = fx.own(ctx.createOscillator());
     o2.type = 'sine';
     o2.frequency.value = f;
-    const g = ctx.createGain();
+    const g = fx.own(ctx.createGain());
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(rand(0.08, 0.22), t + 0.002);
     g.gain.exponentialRampToValueAtTime(0.0008, t + rand(0.05, 0.35));
@@ -1729,10 +1828,10 @@ function glassCrash(when, o = {}) {
     o2.start(t);
     o2.stop(t + 0.4);
   }
-  const th = ctx.createOscillator();
+  const th = fx.own(ctx.createOscillator());
   th.frequency.setValueAtTime(320, when);
   th.frequency.exponentialRampToValueAtTime(140, when + 0.08);
-  const tg = ctx.createGain();
+  const tg = fx.own(ctx.createGain());
   tg.gain.setValueAtTime(0.5, when);
   tg.gain.exponentialRampToValueAtTime(0.001, when + 0.1);
   th.connect(tg);
@@ -1752,38 +1851,38 @@ function glassRattle(when, dur = 0.7) {
 // 마우스피스 버징: 실시간 목소리 하나 (부르르)
 function makeBuzz(when) {
   const ctx = AE.ctx;
-  const osc = ctx.createOscillator();
+  const fx = fxGraph();
+  const osc = fx.own(ctx.createOscillator());
   osc.type = 'sawtooth';
   osc.frequency.value = 180;
-  const sh = ctx.createWaveShaper();
+  const sh = fx.own(ctx.createWaveShaper());
   const curve = new Float32Array(256);
   for (let i = 0; i < 256; i++) {
     const x = i / 128 - 1;
     curve[i] = Math.tanh(x * 2.6);
   }
   sh.curve = curve;
-  const jit = ctx.createOscillator();
+  const jit = fx.own(ctx.createOscillator());
   jit.frequency.value = 7.3;
-  const jg = ctx.createGain();
+  const jg = fx.own(ctx.createGain());
   jg.gain.value = 6;
   jit.connect(jg);
   jg.connect(osc.frequency);
-  const pre = ctx.createGain();
+  const pre = fx.own(ctx.createGain());
   pre.gain.value = 0.7;
   osc.connect(pre);
   pre.connect(sh);
-  const f1 = ctx.createBiquadFilter();
+  const f1 = fx.own(ctx.createBiquadFilter());
   f1.type = 'bandpass';
   f1.frequency.value = 780;
   f1.Q.value = 2.2;
-  const f2 = ctx.createBiquadFilter();
+  const f2 = fx.own(ctx.createBiquadFilter());
   f2.type = 'bandpass';
   f2.frequency.value = 1550;
   f2.Q.value = 3.5;
-  const mix = ctx.createGain();
+  const mix = fx.own(ctx.createGain());
   mix.gain.value = 1;
-  const g1 = ctx.createGain(),
-    g2 = ctx.createGain();
+  const g1 = fx.own(ctx.createGain()), g2 = fx.own(ctx.createGain());
   g1.gain.value = 1.4;
   g2.gain.value = 0.9;
   sh.connect(f1);
@@ -1793,28 +1892,28 @@ function makeBuzz(when) {
   f2.connect(g2);
   g2.connect(mix);
   // 입술 떨림 (부르르): 진폭을 빠르게 흔듦
-  const am = ctx.createGain();
+  const am = fx.own(ctx.createGain());
   am.gain.value = 0.65;
-  const tr = ctx.createOscillator();
+  const tr = fx.own(ctx.createOscillator());
   tr.frequency.value = 27;
-  const tg = ctx.createGain();
+  const tg = fx.own(ctx.createGain());
   tg.gain.value = 0.35;
   tr.connect(tg);
   tg.connect(am.gain);
-  const g = ctx.createGain();
+  const g = fx.own(ctx.createGain());
   g.gain.setValueAtTime(0, when);
   g.gain.linearRampToValueAtTime(0.42, when + 0.03);
   mix.connect(am);
   am.connect(g);
   g.connect(AE.buses.tp);
-  const ns = ctx.createBufferSource();
+  const ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
   ns.loop = true;
-  const nb = ctx.createBiquadFilter();
+  const nb = fx.own(ctx.createBiquadFilter());
   nb.type = 'bandpass';
   nb.frequency.value = 2400;
   nb.Q.value = 1;
-  const ngn = ctx.createGain();
+  const ngn = fx.own(ctx.createGain());
   ngn.gain.value = 0.08;
   ns.connect(nb);
   nb.connect(ngn);
@@ -4695,10 +4794,6 @@ function makeMonitor(w = 0.5, hBack = 0.3, d = 0.4) {
 // ===================== 사람: 뼈대 하나 + 메시 하나 (표정·팔 IK·앉기/서기/점프) =====================
 // 모든 부품을 뼈에 붙여 한 메시로 합침 → 사람 하나 = 그리기 2번(몸·얼굴) + 외곽선
 // 기준 자세: 서서 팔을 내린 자세, 얼굴은 +z
-const PEOPLE = {
-  all: [],
-  drawing: false
-};
 
 const UPY = new THREE.Vector3(0, 1, 0);
 
@@ -4721,10 +4816,6 @@ function handQuat(fingerDir, palmDir, side) {
 
 // ---------- 표정 ----------
 // open: 입 벌림(턱이 같이 내려감), pupil: 눈동자 크기(작을수록 놀람), pop: 눈알 커짐, skew: 눈썹 짝짝이(+면 왼쪽이 올라감)
-
-
-// 재질 (모든 사람 공용)
-const PEOPLE_MAT = {};
 
 function initPeopleMaterials() {
   PEOPLE_MAT.body = toonVC({
@@ -4792,257 +4883,8 @@ function randomLook(seed) {
 // ===== 41_harmony.js =====
 // ===================== 화성 =====================
 // S = 정박에 둘 수 있는 음, W = 엇박까지 허용하는 음 (근음 기준 반음 수), v = 피아노 왼손 보이싱 두 가지
-const PC = {
-  C: 0,
-  'B#': 0,
-  'C#': 1,
-  Db: 1,
-  D: 2,
-  'D#': 3,
-  Eb: 3,
-  E: 4,
-  Fb: 4,
-  F: 5,
-  'E#': 5,
-  'F#': 6,
-  Gb: 6,
-  G: 7,
-  'G#': 8,
-  Ab: 8,
-  A: 9,
-  'A#': 10,
-  Bb: 10,
-  B: 11,
-  Cb: 11
-};
-const QUAL = {
-  'maj7': {
-    tones: [0, 4, 7, 11],
-    S: [0, 2, 4, 7, 9, 11],
-    W: [0, 2, 4, 5, 7, 9, 11],
-    v: [
-      [4, 7, 11, 14],
-      [11, 14, 16, 19]
-    ],
-    guide: [4, 11]
-  },
-  '6': {
-    tones: [0, 4, 7, 9],
-    S: [0, 2, 4, 7, 9],
-    W: [0, 2, 4, 5, 7, 9, 11],
-    v: [
-      [4, 7, 9, 14],
-      [9, 14, 16, 19]
-    ],
-    guide: [4, 9]
-  },
-  '69': {
-    tones: [0, 4, 7, 9],
-    S: [0, 2, 4, 7, 9],
-    W: [0, 2, 4, 7, 9],
-    v: [
-      [4, 7, 9, 14],
-      [9, 14, 16, 19]
-    ],
-    guide: [4, 9]
-  },
-  '7': {
-    tones: [0, 4, 7, 10],
-    S: [0, 2, 4, 7, 9, 10],
-    W: [0, 2, 3, 4, 5, 7, 9, 10],
-    v: [
-      [4, 9, 10, 14],
-      [10, 14, 16, 21]
-    ],
-    guide: [4, 10]
-  },
-  '9': {
-    tones: [0, 4, 7, 10],
-    S: [0, 2, 4, 7, 9, 10],
-    W: [0, 2, 3, 4, 5, 7, 9, 10],
-    v: [
-      [4, 9, 10, 14],
-      [10, 14, 16, 21]
-    ],
-    guide: [4, 10]
-  },
-  '13': {
-    tones: [0, 4, 7, 10],
-    S: [0, 2, 4, 7, 9, 10],
-    W: [0, 2, 3, 4, 5, 7, 9, 10],
-    v: [
-      [4, 9, 10, 14],
-      [10, 14, 16, 21]
-    ],
-    guide: [4, 10]
-  },
-  '7b9': {
-    tones: [0, 4, 7, 10],
-    S: [0, 1, 4, 7, 10],
-    W: [0, 1, 3, 4, 6, 7, 8, 10],
-    v: [
-      [4, 9, 10, 13],
-      [10, 13, 16, 21]
-    ],
-    guide: [4, 10]
-  },
-  '7#9': {
-    tones: [0, 4, 7, 10],
-    S: [0, 3, 4, 7, 10],
-    W: [0, 1, 3, 4, 6, 7, 8, 10],
-    v: [
-      [4, 8, 10, 15],
-      [10, 15, 16, 20]
-    ],
-    guide: [4, 10]
-  },
-  '7alt': {
-    tones: [0, 4, 10],
-    S: [0, 1, 3, 4, 8, 10],
-    W: [0, 1, 3, 4, 6, 8, 10],
-    v: [
-      [4, 8, 10, 15],
-      [10, 13, 16, 20]
-    ],
-    guide: [4, 10]
-  },
-  '7#11': {
-    tones: [0, 4, 7, 10],
-    S: [0, 2, 4, 6, 7, 9, 10],
-    W: [0, 2, 4, 6, 7, 9, 10],
-    v: [
-      [4, 6, 10, 14],
-      [10, 14, 16, 18]
-    ],
-    guide: [4, 10]
-  },
-  '7sus': {
-    tones: [0, 5, 7, 10],
-    S: [0, 2, 5, 7, 9, 10],
-    W: [0, 2, 4, 5, 7, 9, 10],
-    v: [
-      [5, 7, 10, 14],
-      [10, 14, 17, 19]
-    ],
-    guide: [5, 10]
-  },
-  'm7': {
-    tones: [0, 3, 7, 10],
-    S: [0, 2, 3, 5, 7, 9, 10],
-    W: [0, 2, 3, 5, 7, 9, 10],
-    v: [
-      [3, 7, 10, 14],
-      [10, 14, 15, 19]
-    ],
-    guide: [3, 10]
-  },
-  'm9': {
-    tones: [0, 3, 7, 10],
-    S: [0, 2, 3, 5, 7, 9, 10],
-    W: [0, 2, 3, 5, 7, 9, 10],
-    v: [
-      [3, 7, 10, 14],
-      [10, 14, 15, 19]
-    ],
-    guide: [3, 10]
-  },
-  'm6': {
-    tones: [0, 3, 7, 9],
-    S: [0, 2, 3, 7, 9, 11],
-    W: [0, 2, 3, 5, 7, 9, 11],
-    v: [
-      [3, 7, 9, 14],
-      [9, 14, 15, 19]
-    ],
-    guide: [3, 9]
-  },
-  'mMaj7': {
-    tones: [0, 3, 7, 11],
-    S: [0, 2, 3, 7, 9, 11],
-    W: [0, 2, 3, 5, 7, 9, 11],
-    v: [
-      [3, 7, 11, 14],
-      [11, 14, 15, 19]
-    ],
-    guide: [3, 11]
-  },
-  'm7b5': {
-    tones: [0, 3, 6, 10],
-    S: [0, 3, 5, 6, 8, 10],
-    W: [0, 2, 3, 5, 6, 8, 10],
-    v: [
-      [3, 6, 10, 14],
-      [10, 14, 15, 18]
-    ],
-    guide: [3, 10]
-  },
-  'dim7': {
-    tones: [0, 3, 6, 9],
-    S: [0, 3, 6, 9],
-    W: [0, 2, 3, 5, 6, 8, 9, 11],
-    v: [
-      [3, 6, 9, 12],
-      [6, 9, 12, 15]
-    ],
-    guide: [3, 9]
-  },
-};
-const QUAL_NAME = {
-  maj7: 'maj7',
-  '6': '6',
-  '69': '6/9',
-  '7': '7',
-  '9': '9',
-  '13': '13',
-  '7b9': '7♭9',
-  '7#9': '7♯9',
-  '7alt': '7alt',
-  '7#11': '7♯11',
-  '7sus': '7sus',
-  m7: 'm7',
-  m9: 'm9',
-  m6: 'm6',
-  mMaj7: 'mMaj7',
-  m7b5: 'm7♭5',
-  dim7: '°7'
-};
-
-function parseChord(sym) {
-  const m = sym.trim().match(/^([A-G])(#|b)?(.*)$/);
-  if (!m) throw new Error('bad chord ' + sym);
-  const root = PC[m[1] + (m[2] || '')];
-  let q = m[3] || '6';
-  if (!QUAL[q]) {
-    if (q === 'maj' || q === '') q = '6';
-    else if (q === 'm') q = 'm7';
-    else throw new Error('bad quality ' + sym);
-  }
-  return {
-    root,
-    q,
-    name: m[1] + (m[2] || '') + (QUAL_NAME[q] || q),
-    sym
-  };
-}
-// "F7 | Bb7 | Cm7 F7 | ..." → [[{ch, at, len}...], ...]  (마디 안 위치는 박)
-function parseForm(str) {
-  return str.split('|').map(b => b.trim()).filter(b => b.length).map(b => {
-    const cs = b.split(/\s+/).map(parseChord);
-    const len = 4 / cs.length;
-    return cs.map((ch, i) => ({
-      ...ch,
-      at: i * len,
-      len
-    }));
-  });
-}
-const inSet = (m, ch, key) => QUAL[ch.q][key].includes(mod12(m - ch.root));
-const isChordTone = (m, ch) => QUAL[ch.q].tones.includes(mod12(m - ch.root));
-const isGuide = (m, ch) => QUAL[ch.q].guide.includes(mod12(m - ch.root));
-
 function nearestPC(pc, near, lo, hi) {
-  let best = null,
-    bd = 1e9;
+  let best = null, bd = 1e9;
   for (let m = lo; m <= hi; m++)
     if (mod12(m) === mod12(pc) && Math.abs(m - near) < bd) {
       bd = Math.abs(m - near);
@@ -5204,16 +5046,9 @@ const MUS = {
 };
 // 박 위치 → 시간 (스윙: 8분 뒷박을 늦춤)
 function pt(b, pos) {
-  const w = Math.floor(pos + 1e-6),
-    f = pos - w;
+  const w = Math.floor(pos + 1e-6), f = pos - w;
   const ff = Math.abs(f - 0.5) < 1e-6 ? b.swing : f;
   return b.t0 + (w + ff) * b.spb;
-}
-
-function chordAt(b, pos) {
-  for (let i = b.chords.length - 1; i >= 0; i--)
-    if (pos >= b.chords[i].at - 1e-6) return b.chords[i];
-  return b.chords[0];
 }
 
 function barAtTime(t) {
@@ -6150,6 +5985,7 @@ function schedTick() {
   if (!MUS.running || !AE.ctx || (AE.ctx.state !== 'running' && !AE.offline)) return;
   const now = AE.ctx.currentTime;
   if (MUS.gap) gapTick(now);
+  if (MUS.nextT < now - 0.04 && MUS.song && MUS.song.phase !== 'done') MUS.nextT = now + 0.04;
   let guard = 0;
   while (MUS.song && MUS.song.phase !== 'done' && MUS.nextT < now + MUS.look && guard++ < 4) stepBar(MUS.song, now);
   if (MUS.song && MUS.song.phase === 'done' && !MUS.fermata) endSong(now);
@@ -6802,7 +6638,7 @@ function genFinal(S, b) {
   pianoNotes(t, [root + 12, ...PNO.voicing], 3.2, 0.6, 'L', 0.02);
   const tm = nearestPC(ch.root + QUAL[ch.q].tones[1], 60, 55, 67),
     s = nearestSample('B', tm);
-  const tv = new SusVoice(AE.ctx,s, tm, t, AE.buses.tbn, {
+  const tv = new SusVoice(AE.ctx, s, tm, t, AE.buses.tbn, {
     level: vel(0.85),
     fadeIn: 0.03,
     offset: s.start + 0.01
@@ -7126,9 +6962,7 @@ const canPlay = () => !!AE.ctx;
 
 // ---------- 소리 ----------
 // 셈여림 d (0 ~ 1.15)가 크기와 밝기를 같이 바꿈 (금관은 세게 불수록 밝아짐). 높은 음일수록 조금 크게
-const levelFor = m => 0.86 + clamp((m - 60) / 26, 0, 1) * 0.3;
-const dynGain = (m, d) => levelFor(m) * lerp(0.6, 1.1, clamp(d, 0, 1.2));
-const dynCut = d => clamp(3000 * Math.pow(2, clamp(d, 0, 1.2) * 2.5), 2000, 18000);
+
 // 음 하나의 몸통: 지속음 고리 샘플 + 셈여림 필터
 function hornVoice(m, t, d, o = {}) {
   const s = nearestSample('T', m);
@@ -8794,9 +8628,7 @@ function setupBand(scene) {
   const dr = new Person(BANDLOOKS.dr, {
     seated: true,
     seatY,
-    feetFwd: 0.5,
-    mat: PEOPLE_MAT,
-    people: PEOPLE
+    feetFwd: 0.5
   });
   dr.root.position.set(L.dr.pos[0], Y, L.dr.pos[2]);
   dr.root.rotation.y = L.dr.yaw;
@@ -8813,7 +8645,7 @@ function setupBand(scene) {
   }
   dr.kit = kit;
   // ----- 베이스 -----
-  const bs = new Person(BANDLOOKS.bs, { mat: PEOPLE_MAT, people: PEOPLE });
+  const bs = new Person(BANDLOOKS.bs);
   bs.root.position.set(L.bs.pos[0], Y, L.bs.pos[2]);
   bs.root.rotation.y = L.bs.yaw;
   scene.add(bs.root);
@@ -8834,16 +8666,14 @@ function setupBand(scene) {
   const pn = new Person(BANDLOOKS.pn, {
     seated: true,
     seatY: sp2.y - Y,
-    feetFwd: 0.38,
-    mat: PEOPLE_MAT,
-    people: PEOPLE
+    feetFwd: 0.38
   });
   pn.root.position.set(sp2.x, Y, sp2.z);
   pn.root.rotation.y = L.pn.yaw;
   scene.add(pn.root);
   pn.piano = piano;
   // ----- 트롬본 (리더) -----
-  const tb = new Person(BANDLOOKS.tb, { mat: PEOPLE_MAT, people: PEOPLE });
+  const tb = new Person(BANDLOOKS.tb);
   tb.root.position.set(L.tb.pos[0], Y, L.tb.pos[2]);
   tb.root.rotation.y = L.tb.yaw;
   scene.add(tb.root);
@@ -9645,9 +9475,7 @@ function setupCrowd(scene) {
       seated: true,
       seatY: sp.seatY || 0.46,
       lod: far ? 2 : 1,
-      feetFwd: sp.kind === 'bar' ? 0.3 : 0.42,
-      mat: PEOPLE_MAT,
-      people: PEOPLE
+      feetFwd: sp.kind === 'bar' ? 0.3 : 0.42
     });
     p.root.position.copy(sp.pos);
     p.root.rotation.y = sp.yaw;
@@ -9722,7 +9550,7 @@ function setupCrowd(scene) {
       tie: '#ee4a2c',
       pants: '#22244a',
       h: 1.0
-    }, { lod: 1, mat: PEOPLE_MAT, people: PEOPLE });
+    }, { lod: 1 });
     bt.root.position.copy(V.bartender.pos);
     bt.root.rotation.y = V.bartender.yaw;
     scene.add(bt.root);
@@ -11051,12 +10879,12 @@ function crowdSound(dt, t, f, burst) {
   }
   CROWD.clapBed = damp(CROWD.clapBed, clap, hush ? 14 : 6, dt);
   CROWD.bigBed = damp(CROWD.bigBed || 0, big, hush ? 14 : 6, dt);
-  BED.applause.g.gain.setTargetAtTime(CROWD.clapBed, AE.ctx.currentTime, 0.08);
-  BED.applauseBig.g.gain.setTargetAtTime(CROWD.bigBed, AE.ctx.currentTime, 0.08);
+  setBed('applause', CROWD.clapBed, 0.24);
+  setBed('applauseBig', CROWD.bigBed, 0.24);
   // 함성 바탕: 광기가 높을 때만 (음악을 덮지 않게)
   const roar = hush ? 0 : (REACT.meSolo ? smoothstep(0.62, 1, f) * 0.22 : 0) + (burst && burst.k > 0.8 ? 0.28 * smoothstep(0, burst.fade || 1, burst.until - t) : 0);
   CROWD.roar = damp(CROWD.roar, FIN.on && !hush ? 0.3 * FIN.loud : roar, hush ? 12 : 3, dt);
-  BED.roar.g.gain.setTargetAtTime(CROWD.roar, AE.ctx.currentTime, 0.1);
+  setBed('roar', CROWD.roar, 0.3);
   // 광기 중 간간이 "우—!"
   if (!hush && REACT.meSolo && f > 0.55 && t - CROWD.lastWhoop > lerp(2.5, 0.35, smoothstep(0.55, 1, f))) {
     CROWD.lastWhoop = t + rand(0, 0.4);
@@ -12315,7 +12143,7 @@ function windowPerson(i) {
   const sl = WINP.slots[i],
     look = randomLook(700 + i * 13);
   look.h = rand(0.98, 1.08);
-  const p = new Person(look, { lod: 2, mat: PEOPLE_MAT, people: PEOPLE });
+  const p = new Person(look, { lod: 2 });
   p.root.position.set(sl.x, 0.34, sl.z);
   p.root.rotation.y = sl.yaw;
   p.mesh.castShadow = false; // 바깥 계단 위 (안쪽 사람들 머리 너머로 보이게)
@@ -12394,8 +12222,7 @@ function backPerson(i) {
   const [x, z] = BACKP.spots[i], look = randomLook(500 + (i + 1) * 17);
   const p = new Person(look, {
     seated: false,
-    lod: 2,
-    mat: PEOPLE_MAT, people: PEOPLE
+    lod: 2
   });
   p.root.position.set(x, 0, z);
   p.root.rotation.order = 'YXZ';
@@ -13787,9 +13614,7 @@ const AFTER = {
 function afterLoad() {
   try {
     return JSON.parse(localStorage.getItem('egotrip.after') || 'null');
-  } catch (e) {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function afterSave() {
@@ -14093,9 +13918,7 @@ function initUI() {
     if (!window.JAZZ_AUDIO) return;
     try {
       createAudio();
-      PACK.on = f => {
-        UI.el.fill.style.width = Math.round(f * 100) + '%';
-      };
+      PACK.on = f => { UI.el.fill.style.width = Math.round(f * 100) + '%'; };
       PACK.on(PACK.f);
       packBegin();
       initTrumpet();
@@ -14167,6 +13990,7 @@ async function startGame() {
   TP.notes.length = 0;
   TP.lastSoundT = -9;
   TP.cur = null;
+  resetCrowdAudio();
   REACT.reset();
   afterEnd();
   resetCrowdScenes();
@@ -14474,22 +14298,23 @@ function camFx(dt) {
 function popSound(when, pan = 0, vol = 0.5) {
   const ctx = AE.ctx;
   if (!ctx || !AE.noise) return;
-  const out = ctx.createGain();
+  const fx = fxGraph();
+  const out = fx.own(ctx.createGain());
   out.gain.value = vol;
-  const pn = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const pn = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null;
   if (pn) {
     pn.pan.value = clamp(pan, -1, 1);
     out.connect(pn);
     pn.connect(AE.buses.crowd);
   } else out.connect(AE.buses.crowd);
-  const ns = ctx.createBufferSource();
+  const ns = fx.own(ctx.createBufferSource());
   ns.buffer = AE.noise;
-  const bp = ctx.createBiquadFilter();
+  const bp = fx.own(ctx.createBiquadFilter());
   bp.type = 'bandpass';
   bp.frequency.setValueAtTime(2600, when);
   bp.frequency.exponentialRampToValueAtTime(900, when + 0.12);
   bp.Q.value = 0.8;
-  const ng = ctx.createGain();
+  const ng = fx.own(ctx.createGain());
   ng.gain.setValueAtTime(0, when);
   ng.gain.linearRampToValueAtTime(1, when + 0.002);
   ng.gain.exponentialRampToValueAtTime(0.001, when + 0.16);
@@ -14498,10 +14323,10 @@ function popSound(when, pan = 0, vol = 0.5) {
   ng.connect(out);
   ns.start(when, rand(0, 1));
   ns.stop(when + 0.2);
-  const o = ctx.createOscillator();
+  const o = fx.own(ctx.createOscillator());
   o.frequency.setValueAtTime(260, when);
   o.frequency.exponentialRampToValueAtTime(70, when + 0.09);
-  const og = ctx.createGain();
+  const og = fx.own(ctx.createGain());
   og.gain.setValueAtTime(0.9, when);
   og.gain.exponentialRampToValueAtTime(0.001, when + 0.12);
   o.connect(og);
@@ -14513,9 +14338,10 @@ function popSound(when, pan = 0, vol = 0.5) {
 function bellDing(when, vol = 0.2, pan = 0.4) {
   const ctx = AE.ctx;
   if (!ctx) return;
-  const out = ctx.createGain();
+  const fx = fxGraph();
+  const out = fx.own(ctx.createGain());
   out.gain.value = vol;
-  const pn = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const pn = ctx.createStereoPanner ? fx.own(ctx.createStereoPanner()) : null;
   if (pn) {
     pn.pan.value = pan;
     out.connect(pn);
@@ -14526,10 +14352,10 @@ function bellDing(when, vol = 0.2, pan = 0.4) {
     amps = [0.5, 0.6, 1, 0.5, 0.75, 0.4, 0.25],
     decs = [1.6, 1.3, 1.0, 0.8, 0.9, 0.5, 0.35];
   ratios.forEach((r, i) => {
-    const o = ctx.createOscillator();
+    const o = fx.own(ctx.createOscillator());
     o.type = 'sine';
     o.frequency.value = f * r * rand(0.998, 1.002);
-    const g = ctx.createGain();
+    const g = fx.own(ctx.createGain());
     g.gain.setValueAtTime(0, when);
     g.gain.linearRampToValueAtTime(amps[i] * 0.3, when + 0.003);
     g.gain.exponentialRampToValueAtTime(0.0006, when + decs[i]);
@@ -14562,6 +14388,7 @@ function smooch(when, pan = 0, vol = 0.22) {
 }
 // 다 같이 박에 맞춰 "헤이!"
 function heyShout(when, lvl = 1) {
+  if (playBakedFx('hey', when, lvl)) return;
   for (let i = 0; i < 6; i++) {
     const fem = i % 2 === 0;
     voiceBlip(when + rand(-0.008, 0.026), {
@@ -16246,7 +16073,7 @@ function finRush() {
   FIN.stageT = NOW.t;
   const c = V3(0, 0, -4.4);
   FIN.pool = CROWD.list.filter(m => m.p.root.visible && !m.override && m.kind !== 'bar' && !m.far && m.spot && !(m.reserved && !m.converted))
-    .map(m => ({m, d: (m.kind === 'front' ? 0 : 3) + m.spot.pos.distanceTo(c)})).sort((a, b) => a.d - b.d).map(o => o.m);
+    .map(m => ({ m, d: (m.kind === 'front' ? 0 : 3) + m.spot.pos.distanceTo(c) })).sort((a, b) => a.d - b.d).map(o => o.m);
   const n = Math.min(FIN_SLOTS.length, FIN.pool.length);
   for (let i = 0; i < n; i++) finSend(FIN.pool[i], i, i * 0.17 + rand(0, 0.12));
   REACT.later(0.9, () => {
@@ -17312,7 +17139,7 @@ function finTick(dt, t) {
       if (!FIN.slots[0] && t - FIN.stageT > 1.5 && !FIN.fans.some(f => f.st === 'react')) finAdvance();
       const hush = !!cur && (!!FIN.draw || (FIN.ink > 0 && t - FIN.inkT < 2.2));
       FIN.hushK = damp(FIN.hushK, hush ? 1 : 0, 9, dt);
-      if (AE.decoded && BED.babble) BED.babble.g.gain.setTargetAtTime(0.12 * (1 - FIN.hushK), AE.ctx.currentTime, 0.1); // 쓰는 동안은 웅성거림도 뚝
+      if (AE.decoded && BED.babble) setBed('babble', 0.12 * (1 - FIN.hushK), 0.3); // 쓰는 동안은 웅성거림도 뚝
       // 여기저기서 터지는 외침
       if (AE.decoded && !hush && t > FIN.nextYell) {
         FIN.nextYell = t + rand(0.7, 2.3);

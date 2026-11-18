@@ -1,4 +1,5 @@
 import { MathUtils } from "three";
+import { inSet } from './Harmony.js';
 
 export const rateFor = (s, midi, cents = 0) => Math.pow(2, (midi - s.m) / 12 + ((s.c || 0) + cents) / 1200);
 export const clamp = MathUtils.clamp;
@@ -19,8 +20,7 @@ export function nearestAllowed(raw, ch, key, dir = 1) {
   raw = Math.round(raw);
   for (let d = 0; d <= 7; d++) {
     const c = d === 0 ? [raw] : (dir >= 0 ? [raw + d, raw - d] : [raw - d, raw + d]);
-    for (const m of c)
-      if (inSet(m, ch, key)) return m;
+    for (const m of c) if (inSet(m, ch, key)) return m;
   }
   return raw;
 }

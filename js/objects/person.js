@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { Rig } from './rig.js';
 import { latheY } from '../utils/GeomUtils.js';
-import { HAND_POSE, BONE, NOW } from '../data/data.js';
-import { clamp, damp, dampAngle, smooth01, lerp } from '../utils/Math.js';
+import { HAND_POSE, BONE, NOW, PEOPLE } from '../data/data.js';
+import { FACES, PEOPLE_MAT } from '../data/faces.js';
+import { clamp, damp, dampAngle, smooth01, smoothstep, lerp } from '../utils/Math.js';
 import { seeded, rand } from '../utils/Random.js';
 import { M4, V3 } from '../utils/Vector.js';
 import { shadeHex, mixHex } from '../utils/ColorUtils.js';
-import { FACES } from '../data/faces.js';
 
 // 좌/우 반복용 상수 (update 안에서 매 프레임 배열을 새로 만들지 않도록)
 const PERSON_SIDES = Object.freeze(['L', 'R']);
@@ -77,8 +77,6 @@ export class Person {
     this.look = look;
     this.seated = !!o.seated;
     this.lod = o.lod || 0;
-    this.PEOPLE_MAT = o.mat;
-    this.PEOPLE = o.people;
     const h = look.h || 1, w = look.w || 1, H = look.headScale || 1.72;
     this.h = h;
     this.w = w;
@@ -142,7 +140,7 @@ export class Person {
     };
     this.seatY = o.seatY || 0.46;
     this.feetFwd = o.feetFwd || 0.42;
-    this.PEOPLE.all.push(this);
+    PEOPLE.all.push(this);
   }
   // ----- 뼈대 -----
   makeBones() {
@@ -263,18 +261,17 @@ export class Person {
     const torsoW = p => {
       const y = p.y;
       if (y < spY) {
-        const t = THREE.MathUtils.smoothstep(hipY - 0.02, spY, y);
+        const t = smoothstep(hipY - 0.02, spY, y);
         return [[Bn.hips, 1 - t], [Bn.spine, t]];
       }
       if (y < chY) {
-        const t = THREE.MathUtils.smoothstep(spY, chY + 0.02, y);
+        const t = smoothstep(spY, chY + 0.02, y);
         return [[Bn.spine, 1 - t], [Bn.chest, t]];
       }
-      const t = THREE.MathUtils.smoothstep(nkY - 0.03, nkY + 0.03, y);
+      const t = smoothstep(nkY - 0.03, nkY + 0.03, y);
       return [[Bn.chest, 1 - t], [Bn.neck, t]];
     };
     // 몸통 가중치: 엉덩이↔허리↔가슴 부드럽게
-
     // 몸통 회전체 (단면 타원): 엉덩이-허리-가슴-어깨
     const belly = L.belly || 0,
       fem = !!L.fem;
@@ -487,11 +484,8 @@ export class Person {
     rig.add(G.sph(sseg, [18, 13, 11][lo] || 11), skin, hb, headM);
     // 턱·볼 (아래 앞쪽으로 살짝). 입을 크게 벌리면 아래턱이 늘어나며 내려감
     rig.add(G.sph(sseg, 12), skin, p => {
-      const k = THREE.MathUtils.smoothstep(hc.y - R * 0.4, hc.y - R * 0.86, p.y);
-      return [
-        [Bn.jaw, k],
-        [hb, 1 - k]
-      ];
+      const k = smoothstep(hc.y - R * 0.4, hc.y - R * 0.86, p.y);
+      return [[Bn.jaw, k], [hb, 1 - k]];
     }, M4([hc.x, hc.y - R * 0.38, hc.z + R * 0.13], 0, [R * (L.jawW || 0.86), R * 0.66, R * 0.84]));
     // 귀
     for (const sx of [1, -1]) rig.add(G.sph(10, 8), shadeHex(skin, 0.94), hb, M4([hc.x + sx * R * 0.97, hc.y - R * 0.08, hc.z - R * 0.05], [0, sx * 0.3, 0], [R * 0.13, R * 0.22, R * 0.09]));
@@ -531,7 +525,7 @@ export class Person {
       // 가운데는 입 뼈, 양끝은 입꼬리 뼈 (입 안 어둠은 같은 모양을 따라가는 안쪽 뼈들)
       const split = (ce, cl, cr) => p => {
         const ax = Math.abs(p.x - hw.x);
-        const t = THREE.MathUtils.smoothstep(mw * 0.25, mw * 0.95, ax);
+        const t = smoothstep(mw * 0.25, mw * 0.95, ax);
         return p.x >= hw.x ? [[ce, 1 - t], [cl, t]] : [[ce, 1 - t], [cr, t]];
       };
       const m0 = [hw.x, hw.y + mp.y, hw.z + mp.z];
@@ -558,7 +552,7 @@ export class Person {
           if (rr < 1e-4) continue;
           let a = Math.atan2(z, -x);
           if (a < ph0 - 0.01) a += Math.PI * 2;
-          const k = lerp(0.8, 1, THREE.MathUtils.smoothstep(0, 0.42, Math.min(a - ph0, ph0 + phL - a)));
+          const k = lerp(0.8, 1, smoothstep(0, 0.42, Math.min(a - ph0, ph0 + phL - a)));
           bp.setXYZ(i, x * k, y, z * k);
         }
         bg.computeVertexNormals();
@@ -585,7 +579,7 @@ export class Person {
     // ----- 메시 -----
     const geo = rig.build();
     G.capSeg = 6;
-    const mats = [this.PEOPLE_MAT.body, this.PEOPLE_MAT.face, this.PEOPLE_MAT.decal].filter((m, i) => rig.groupsUsed[i]);
+    const mats = [PEOPLE_MAT.body, PEOPLE_MAT.face, PEOPLE_MAT.decal].filter((_, i) => rig.groupsUsed[i]);
     const mesh = this.mesh = new THREE.SkinnedMesh(geo, mats);
     mesh.frustumCulled = false;
     mesh.castShadow = !this.lod;
@@ -598,7 +592,7 @@ export class Person {
     this.dirty = true;
     this.skDirty = true;
     root.updateMatrixWorld = (force) => {
-      if (this.PEOPLE.drawing) {
+      if (PEOPLE.drawing) {
         if (!self.dirty) return;
         self.dirty = false;
       }
@@ -798,17 +792,6 @@ export class Person {
     return this.bones[BONE.chest].getWorldPosition(out);
   }
 
-  // ----- 정리 -----
-  dispose() {
-    const i = this.PEOPLE.all.indexOf(this);
-    if (i >= 0) this.PEOPLE.all.splice(i, 1);
-    if (this.mesh) {
-      this.mesh.geometry.dispose();
-      this.mesh.skeleton.dispose();
-    }
-    this.root.removeFromParent();
-  }
-
   // ----- 매 프레임 -----
   update(dt, t, beat) {
     const c = this.c,
@@ -879,8 +862,11 @@ export class Person {
     const lean = s.lean + (1 - st) * 0.05 + bounce * 0.04 + bang * 0.25 * Math.max(0, Math.sin(beat * Math.PI * 2)) - shock * 0.07;
     B[Bn.spine].rotation.set(lean * 0.45, s.twist * 0.45, s.side * 0.5 - sway * 0.06);
     B[Bn.chest].rotation.set(lean * 0.55, s.twist * 0.55, s.side * 0.5 + sway * 0.1);
-    // 머리: 시선. 여기서 뼈 전체의 월드 행렬을 한 번 맞춤 (엉덩이·허리·가슴은 위에서 정했고, 팔다리 IK는 이 값을 그대로 씀)
-    PERSON_SYNC.call(this.root, true);
+    // IK only reads the torso and clavicle parents here. Updating every finger,
+    // face bone and mesh before animating them duplicated the render traversal.
+    B[Bn.neck].updateWorldMatrix(true, false);
+    B[Bn.clavL].updateWorldMatrix(false, false);
+    B[Bn.clavR].updateWorldMatrix(false, false);
     const hp = _pv1.setFromMatrixPosition(B[Bn.neck].matrixWorld);
     const rel = _pv2.copy(c.look).sub(hp);
     _pq1.setFromRotationMatrix(B[Bn.chest].matrixWorld).invert();
@@ -1070,12 +1056,12 @@ export class Person {
       cb.scale.set(1, 0.25 + open * 0.55, 1);
     }
     // 입 안 어둠: 벌릴 때만 펼쳐짐
-    const gate = THREE.MathUtils.smoothstep(0.1, 0.42, open) + 1e-4;
+    const gate = smoothstep(0.1, 0.42, open) + 1e-4;
     B[Bn.mouthIn].scale.set(1, gate, 1);
     B[Bn.cornerInL].scale.set(1, gate, 1);
     B[Bn.cornerInR].scale.set(1, gate, 1);
     // 윗니는 입천장에, 혀는 아랫입술 쪽에
-    const tk = THREE.MathUtils.smoothstep(0.16, 0.5, open) + 1e-4,
+    const tk = smoothstep(0.16, 0.5, open) + 1e-4,
       inH = hh * 0.8 * gate,
       sinT = Math.sin(tilt - 0.1);
     const tb = B[Bn.teeth],
@@ -1083,7 +1069,7 @@ export class Person {
       wx = 1 + wd * 0.3;
     tb.position.set(0, cy + inH - R * 0.05 * tk * 0.9, mp.z + drop * 0.06 + inH * sinT);
     tb.scale.set(wx * tk, tk, tk);
-    const tgk = THREE.MathUtils.smoothstep(0.35, 0.9, open) + 1e-4;
+    const tgk = smoothstep(0.35, 0.9, open) + 1e-4;
     tg.position.set(0, cy - inH + R * 0.075 * tgk * 0.75, mp.z + drop * 0.06 - inH * sinT);
     tg.scale.set(wx * tgk, tgk, tgk);
     // 턱: 아랫입술을 따라 내려감

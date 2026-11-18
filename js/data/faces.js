@@ -248,3 +248,6 @@ export const FACES = {
 
 for (const k in FACES) FACES[k] = Object.assign({}, FACE_DEF, FACES[k]);
 export const SHOCK_FACES = new Set(['jawdrop', 'disbelief', 'gasp', 'awe', 'wow']);
+
+// 재질 (모든 사람 공용)
+export const PEOPLE_MAT = {};
