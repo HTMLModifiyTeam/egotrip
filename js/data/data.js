@@ -83,3 +83,10 @@ export const HAND_POSE = { // [손가락 셋, 검지, 엄지] 굽힘
   spread: [-0.1, -0.15, -0.3],
   horn: [1.5, 0.0, 0.6],
 };
+
+export const NOW = {
+  t: 0,
+  dt: 0.016,
+  last: 0,
+  frame: 0
+};

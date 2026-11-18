@@ -1,7 +1,12 @@
 import * as THREE from 'three';
 import { Rig } from './rig.js';
 import { latheY } from '../utils/GeomUtils.js';
-import { HAND_POSE, BONE } from '../data/data.js';
+import { HAND_POSE, BONE, NOW } from '../data/data.js';
+import { clamp, damp, dampAngle, smooth01, lerp } from '../utils/Math.js';
+import { seeded, rand } from '../utils/Random.js';
+import { M4, V3 } from '../utils/Vector.js';
+import { shadeHex, mixHex } from '../utils/ColorUtils.js';
+import { FACES } from '../data/faces.js';
 
 // 좌/우 반복용 상수 (update 안에서 매 프레임 배열을 새로 만들지 않도록)
 const PERSON_SIDES = Object.freeze(['L', 'R']);
@@ -33,7 +38,7 @@ const _pq1 = new THREE.Quaternion(), _pq2 = new THREE.Quaternion(), _pq3 = new T
 function capBetween(a, b, rad, seg = 12) {
   const d = _pv1.copy(b).sub(a), len = d.length();
   const g = G.cap(len + rad * 0.0, rad, seg);
-  const q = new THREE.Quaternion().setFromUnitVectors(UPY, d.clone().normalize());
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.clone().normalize());
   const mid = a.clone().add(b).multiplyScalar(0.5);
   return { g, m: new THREE.Matrix4().compose(mid, q, new THREE.Vector3(1, 1, 1)) };
 }
@@ -72,6 +77,8 @@ export class Person {
     this.look = look;
     this.seated = !!o.seated;
     this.lod = o.lod || 0;
+    this.PEOPLE_MAT = o.mat;
+    this.PEOPLE = o.people;
     const h = look.h || 1, w = look.w || 1, H = look.headScale || 1.72;
     this.h = h;
     this.w = w;
@@ -135,7 +142,7 @@ export class Person {
     };
     this.seatY = o.seatY || 0.46;
     this.feetFwd = o.feetFwd || 0.42;
-    PEOPLE.all.push(this);
+    this.PEOPLE.all.push(this);
   }
   // ----- 뼈대 -----
   makeBones() {
@@ -578,7 +585,7 @@ export class Person {
     // ----- 메시 -----
     const geo = rig.build();
     G.capSeg = 6;
-    const mats = [PEOPLE_MAT.body, PEOPLE_MAT.face, PEOPLE_MAT.decal].filter((m, i) => rig.groupsUsed[i]);
+    const mats = [this.PEOPLE_MAT.body, this.PEOPLE_MAT.face, this.PEOPLE_MAT.decal].filter((m, i) => rig.groupsUsed[i]);
     const mesh = this.mesh = new THREE.SkinnedMesh(geo, mats);
     mesh.frustumCulled = false;
     mesh.castShadow = !this.lod;
@@ -591,7 +598,7 @@ export class Person {
     this.dirty = true;
     this.skDirty = true;
     root.updateMatrixWorld = (force) => {
-      if (PEOPLE.drawing) {
+      if (this.PEOPLE.drawing) {
         if (!self.dirty) return;
         self.dirty = false;
       }
@@ -792,16 +799,16 @@ export class Person {
   }
 
   // ----- 정리 -----
-  // 관객을 없앨 때 부름: 목록에서 빼고 지오메트리·뼈 텍스처를 해제 (재질은 PEOPLE_MAT를 공유하므로 건드리지 않음)
   dispose() {
-    const i = PEOPLE.all.indexOf(this);
-    if (i >= 0) PEOPLE.all.splice(i, 1);
+    const i = this.PEOPLE.all.indexOf(this);
+    if (i >= 0) this.PEOPLE.all.splice(i, 1);
     if (this.mesh) {
       this.mesh.geometry.dispose();
       this.mesh.skeleton.dispose();
     }
     this.root.removeFromParent();
   }
+
   // ----- 매 프레임 -----
   update(dt, t, beat) {
     const c = this.c,
@@ -851,8 +858,7 @@ export class Person {
     // 무릎 꿇기 / 의자에서 미끄러져 바닥에 주저앉기
     s.kneel = damp(s.kneel, c.kneel || 0, 4.2, dt);
     s.slump = damp(s.slump, c.slump || 0, 2.6, dt);
-    const kn = smooth01(s.kneel),
-      sl = smooth01(s.slump);
+    const kn = smooth01(s.kneel), sl = smooth01(s.slump);
     let hipsY = lerp(sitH, standH - bounce * 0.07 - 0.015, st) + s.jumpY;
     let hipsZ = lerp(-0.06, 0, st);
     if (kn > 0.001) {
@@ -907,9 +913,7 @@ export class Person {
   }
 
   updateLegs(st, c) {
-    const B = this.bones,
-      Bn = BONE,
-      h = this.h;
+    const B = this.bones, Bn = BONE, h = this.h;
     for (const s of PERSON_SIDES) {
       const sx = s === 'L' ? 1 : -1;
       // 발 목표 (루트 기준): 앉음 = 의자 앞 바닥, 서 있음 = 엉덩이 아래
@@ -941,12 +945,9 @@ export class Person {
       B = this.bones,
       Bn = BONE,
       sx = side === 'L' ? 1 : -1;
-    const iu = Bn['upper' + side],
-      iff = Bn['fore' + side],
-      ih = Bn['hand' + side];
+    const iu = Bn['upper' + side], iff = Bn['fore' + side], ih = Bn['hand' + side];
     // 손 모양
-    const hp = HAND_POSE[A.hand] || HAND_POSE.relax,
-      hc = this.handCur[side];
+    const hp = HAND_POSE[A.hand] || HAND_POSE.relax, hc = this.handCur[side];
     for (let k = 0; k < 3; k++) hc[k] = damp(hc[k], hp[k], 14, dt);
     B[Bn['fing' + side]].rotation.set(0, 0, -sx * hc[0]);
     B[Bn['index' + side]].rotation.set(0, 0, -sx * hc[1]);

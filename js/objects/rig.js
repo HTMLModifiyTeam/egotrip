@@ -8,6 +8,7 @@ export class Rig {
     this.parts = Array.from({ length: 3 }, () => []);
     this.groupsUsed = [false, false, false];
   }
+
   /**
    * 조각 하나를 추가한다. geo는 부르는 쪽에서 방금 만든 것이어야 함 (여기서 변형·가공하므로 다시 쓰면 안 됨).
    * @param geo   BufferGeometry (인덱스 없으면 정점을 합쳐 줌)

@@ -1,10 +1,12 @@
-// 지속음 목소리 (트럼펫·트롬본 공용): 고리 샘플 + 음높이 미끄러짐 + 비브라토
-// 외부 의존: rand, rateFor, dynGain, dynCut, trackBandVoice
+import { rateFor } from '../utils/Math.js';
+import { rand } from '../utils/Random.js';
+import { trackBandVoice } from '../audio/BandVoice.js';
+
 const TC = 2.5; // 'time'(대략 도달 시간) → setTargetAtTime 시정수 변환 계수
 
-class SusVoice {
+export class SusVoice {
   constructor(audio, sample, midi, when, dest, o = {}) {
-    const ctx = audio.ctx;
+    const ctx = audio;
     this.s = sample;
     this.midi = midi;
     this.dest = dest;
@@ -22,9 +24,7 @@ class SusVoice {
     if (o.scoop) {
       src.playbackRate.setValueAtTime(this.rate * Math.pow(2, o.scoop / 12), when);
       src.playbackRate.setTargetAtTime(this.rate, when, (o.scoopTime || 0.03) / TC);
-    } else {
-      src.playbackRate.setValueAtTime(this.rate, when);
-    }
+    } else src.playbackRate.setValueAtTime(this.rate, when);
 
     // 음량 (fadeIn: 0을 직접 지정해도 존중)
     const lvl = o.level ?? 1;

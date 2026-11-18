@@ -1,3 +1,5 @@
+import { mod12, clamp, nearestAllowed } from "../utils/Math.js";
+
 const EPS = 1e-6;
 const snapHalf = x => Math.round(x * 2) / 2; // 8분음표 격자로 맞춤
 
@@ -116,21 +118,14 @@ export class Improviser {
         n = clamp(nearestAllowed(n, ch, 'S', this.dir), this.lo, this.hi);
         // 쉼은 항상 8분음표 격자에 맞춰 박자가 틀어지지 않게
         this.rest = Math.max(0.5, snapHalf(pick([1, 1.5, 2, 2.5, 3]) * (1.35 - busy)));
-      } else if (motifLen) {
-        len = motifLen;
-      } else if (Math.random() < 0.12) {
-        len = 1;
-      }
+      } else if (motifLen) len = motifLen;
+      else if (Math.random() < 0.12) len = 1;
 
       // 셋잇단 꾸밈 (프레이즈 끝음에는 적용하지 않음)
       if (!straight && onBeat && !phraseEnd && pos + 1 <= to + EPS && Math.random() < this.trip * busy) {
         const a = clamp(nearestAllowed(n + this.dir * 2, ch, 'W', this.dir), this.lo, this.hi);
         const c = clamp(n + this.dir, this.lo, this.hi);
-        out.push(
-          { pos, dur: 1 / 3, m: a, v: 0.85 },
-          { pos: pos + 1 / 3, dur: 1 / 3, m: c, v: 0.8 },
-          { pos: pos + 2 / 3, dur: 1 / 3, m: n, v: 0.9 }
-        );
+        out.push({ pos, dur: 1 / 3, m: a, v: 0.85 }, { pos: pos + 1 / 3, dur: 1 / 3, m: c, v: 0.8 }, { pos: pos + 2 / 3, dur: 1 / 3, m: n, v: 0.9 });
         this.last = n;
         this._idx++;
         pos += 1;

@@ -1,5 +1,6 @@
+import { mod12, nearestAllowed } from "../utils/Math.js";
 
-class Soloist {
+export class Soloist {
   constructor(audio, o) {
     Object.assign(this, {
       lo: 57,

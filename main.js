@@ -2,20 +2,17 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 import TUNES from './js/data/tunes.js';
-import { STYLE, BONE } from './js/data/data.js';
-import { clamp, smooth01, lerp, seeded, rand, pick, randi, rateFor } from './js/utils/math.js';
+import { STYLE, BONE, NOW } from './js/data/data.js';
+import { FACES, FACE_DEF } from './js/data/faces.js';
+import { Soloist } from './js/audio/soloist.js';
+import { SusVoice } from './js/audio/susvoice.js';
+import { Improviser } from './js/audio/improviser.js';
+import { stopBandVoices, trackBandVoice } from './js/audio/BandVoice.js';
 import { latheY } from './js/utils/GeomUtils.js';
+import { clamp, smooth01, lerp, rateFor, damp, mod12, smoothstep, nearestAllowed, dampAngle } from './js/utils/Math.js';
+import { seeded, rand, pick, randi, shuffle } from './js/utils/Random.js';
 import { Person } from './js/objects/person.js';
-
-// ===== 00_util.js =====
-// ===================== 공용 도구 =====================
-
-const NOW = {
-  t: 0,
-  dt: 0.016,
-  last: 0,
-  frame: 0
-};
+import { M4, V3 } from './js/utils/Vector.js';
 
 // ===== 05_style.js =====
 // ===================== 그림체: 셀 셰이딩 + 잉크 외곽선 =====================
@@ -173,19 +170,6 @@ function basicMat(color, o = {}) {
   return outline(m, o.outline || 0);
 }
 
-// ---------- 기하 도우미 ----------
-const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
-const _e4 = new THREE.Euler(),
-  _q4 = new THREE.Quaternion();
-
-function M4(p = [0, 0, 0], r = [0, 0, 0], s = [1, 1, 1]) {
-  if (!Array.isArray(r)) r = [0, 0, 0];
-  if (typeof s === 'number') s = [s, s, s];
-  else if (!Array.isArray(s)) s = [1, 1, 1];
-  _e4.set(r[0], r[1], r[2]);
-  _q4.setFromEuler(_e4);
-  return new THREE.Matrix4().compose(V3(p[0], p[1], p[2]), _q4, V3(s[0], s[1], s[2]));
-}
 // 꼭짓점 색을 입힌 복제본 (병합용). uv는 지움
 function vcol(geo, color, m) {
   let g = geo.index ? geo.toNonIndexed() : new THREE.BufferGeometry().copy(geo);
@@ -992,36 +976,6 @@ function nearestSample(set, midi, rr = 0) {
   return best;
 }
 
-const bandVoices = new Set();
-
-function trackBandVoice(src, g, dest, lfo = null) {
-  const b = AE.buses;
-  if (dest !== b.tbn && dest !== b.pno && dest !== b.pnoSolo && dest !== b.bass && dest !== b.drums) return;
-  const voice = { src, g, lfo };
-  bandVoices.add(voice);
-  src.addEventListener('ended', () => bandVoices.delete(voice), {
-    once: true
-  });
-}
-
-function stopBandVoices(now) {
-  for (const { src, g, lfo } of bandVoices) {
-    const gain = g.gain;
-    if (gain.cancelAndHoldAtTime) gain.cancelAndHoldAtTime(now);
-    else {
-      const level = gain.value;
-      gain.cancelScheduledValues(now);
-      gain.setValueAtTime(level, now);
-    }
-    gain.linearRampToValueAtTime(0, now + 0.04);
-    try {
-      src.stop(now + 0.05);
-      if (lfo) lfo.stop(now + 0.05);
-    } catch { }
-  }
-  bandVoices.clear();
-}
-
 // 한 번 치는 소리
 function playOne(sample, midi, when, vel, dest, o = {}) {
   if (!sample) return null;
@@ -1052,7 +1006,7 @@ function playOne(sample, midi, when, vel, dest, o = {}) {
     out = p;
   }
   out.connect(dest);
-  trackBandVoice(src, g, dest);
+  trackBandVoice(ctx, src, g, dest);
   const offset = (sample.start || 0) + (o.offset || 0);
   if (o.dur != null) {
     const rel = o.release || 0.08,
@@ -1090,17 +1044,14 @@ function playBuf(buf, when, vel, dest, o = {}) {
     out = p;
   }
   out.connect(dest);
-  trackBandVoice(src, g, dest);
+  trackBandVoice(ctx, src, g, dest);
   src.start(when, o.offset || 0);
   src.onended = () => {
     src.disconnect();
     g.disconnect();
     if (out !== g) out.disconnect();
   };
-  return {
-    src,
-    g
-  };
+  return { src, g };
 }
 
 // 소리 하나를 지금 바로 짧게 끊음 (놓아준 뒤 꼬리가 남아 있어도)
@@ -4768,268 +4719,9 @@ function handQuat(fingerDir, palmDir, side) {
   return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(X, Y, Z));
 }
 
-function shadeHex(hex, k) {
-  const c = new THREE.Color(hex);
-  c.r = clamp(c.r * k, 0, 1);
-  c.g = clamp(c.g * k, 0, 1);
-  c.b = clamp(c.b * k, 0, 1);
-  return c;
-}
-
-function mixHex(a, b, t) {
-  return new THREE.Color(a).lerp(new THREE.Color(b), t);
-}
-
 // ---------- 표정 ----------
 // open: 입 벌림(턱이 같이 내려감), pupil: 눈동자 크기(작을수록 놀람), pop: 눈알 커짐, skew: 눈썹 짝짝이(+면 왼쪽이 올라감)
-const FACE_DEF = {
-  brow: 0,
-  browIn: 0,
-  lid: 0,
-  open: 0.05,
-  smile: 0.25,
-  width: 0,
-  pupil: 1,
-  pop: 1,
-  skew: 0
-};
-const FACES = {
-  calm: {
-    brow: 0,
-    browIn: 0,
-    lid: 0,
-    open: 0.05,
-    smile: 0.25,
-    width: 0
-  },
-  smile: {
-    brow: 0.15,
-    browIn: 0.05,
-    lid: 0.05,
-    open: 0.08,
-    smile: 0.85,
-    width: 0.1
-  },
-  grin: {
-    brow: 0.35,
-    browIn: 0,
-    lid: 0.15,
-    open: 0.55,
-    smile: 1,
-    width: 0.25
-  },
-  laugh: {
-    brow: 0.45,
-    browIn: 0.3,
-    lid: 0.82,
-    open: 0.85,
-    smile: 1,
-    width: 0.3
-  },
-  awe: {
-    brow: 1.25,
-    browIn: 0.4,
-    lid: -0.65,
-    open: 1.3,
-    smile: -0.1,
-    width: -0.3,
-    pupil: 0.62,
-    pop: 1.13
-  },
-  wow: {
-    brow: 1.05,
-    browIn: 0.15,
-    lid: -0.5,
-    open: 0.95,
-    smile: 0.1,
-    width: -0.2,
-    pupil: 0.72,
-    pop: 1.08
-  },
-  angry: {
-    brow: -1.15,
-    browIn: -0.8,
-    lid: 0.55,
-    open: 0.38,
-    smile: -1,
-    width: -0.18,
-    pupil: 0.9,
-    pop: 1.03
-  },
-  stank: {
-    brow: -0.7,
-    browIn: -0.9,
-    lid: 0.45,
-    open: 0.25,
-    smile: -0.7,
-    width: -0.25
-  },
-  bliss: {
-    brow: 0.4,
-    browIn: 0.55,
-    lid: 0.95,
-    open: 0.12,
-    smile: 0.7,
-    width: 0.05
-  },
-  ecstasy: {
-    brow: 0.9,
-    browIn: 0.7,
-    lid: 0.9,
-    open: 1.05,
-    smile: 0.6,
-    width: 0.2
-  },
-  scream: {
-    brow: 0.75,
-    browIn: -0.2,
-    lid: -0.2,
-    open: 1.25,
-    smile: 0.35,
-    width: 0.25,
-    pupil: 0.85
-  },
-  ask: {
-    brow: 0.6,
-    browIn: 0.25,
-    lid: 0,
-    open: 0.1,
-    smile: 0.35,
-    width: 0
-  },
-  focus: {
-    brow: -0.2,
-    browIn: -0.25,
-    lid: 0.25,
-    open: 0.05,
-    smile: 0,
-    width: 0
-  },
-  blow: {
-    brow: 0.15,
-    browIn: 0.2,
-    lid: 0.35,
-    open: 0.12,
-    smile: -0.1,
-    width: -0.55
-  },
-  whistle: {
-    brow: 0.5,
-    browIn: 0.2,
-    lid: 0.2,
-    open: 0.3,
-    smile: 0,
-    width: -0.75
-  },
-  shout: {
-    brow: 0.6,
-    browIn: -0.4,
-    lid: 0.1,
-    open: 1.1,
-    smile: 0.1,
-    width: 0.1
-  },
-  nod: {
-    brow: 0.2,
-    browIn: 0.1,
-    lid: 0.3,
-    open: 0.06,
-    smile: 0.5,
-    width: 0.05
-  },
-  // "와… 너 지금 미쳤냐": 턱이 툭 떨어지고 눈이 휘둥그레, 눈동자는 콩알만 하게
-  jawdrop: {
-    brow: 1.45,
-    browIn: 0.5,
-    lid: -0.7,
-    open: 2.0,
-    smile: -0.2,
-    width: -0.14,
-    pupil: 0.48,
-    pop: 1.2
-  },
-  // "이게 말이 돼?": 한쪽 눈썹만 치켜뜨고 입은 반쯤 벌어짐
-  disbelief: {
-    brow: 0.85,
-    browIn: 0.05,
-    lid: -0.35,
-    open: 0.95,
-    smile: -0.3,
-    width: -0.1,
-    pupil: 0.6,
-    pop: 1.08,
-    skew: 1.1
-  },
-  // 숨 들이켜는 순간: 동그랗게 벌린 입
-  gasp: {
-    brow: 1.4,
-    browIn: 0.65,
-    lid: -0.7,
-    open: 1.45,
-    smile: -0.3,
-    width: -0.62,
-    pupil: 0.46,
-    pop: 1.22
-  },
-  // 어이없어서 터지는 웃음: 눈썹은 팔자로 올라가고 입은 크게
-  stunlaugh: {
-    brow: 1.05,
-    browIn: 0.85,
-    lid: 0.5,
-    open: 1.3,
-    smile: 0.8,
-    width: 0.15,
-    pupil: 0.9,
-    pop: 1.0
-  },
-  // 기절: 눈 감고 입 헤벌림
-  out: {
-    brow: 0.35,
-    browIn: 0.5,
-    lid: 1.0,
-    open: 0.75,
-    smile: -0.25,
-    width: -0.05,
-    pupil: 1,
-    pop: 1
-  },
-  // 숨 참기: 입술 꾹, 눈알 튀어나옴
-  puff: {
-    brow: 1.0,
-    browIn: 0.55,
-    lid: -0.55,
-    open: 0.0,
-    smile: -0.35,
-    width: -0.5,
-    pupil: 0.55,
-    pop: 1.2
-  },
-  // 어지러움: 눈은 반쯤, 입은 헤
-  dizzy: {
-    brow: 0.5,
-    browIn: 0.7,
-    lid: 0.55,
-    open: 0.55,
-    smile: 0.25,
-    width: 0.05,
-    pupil: 0.8,
-    pop: 1.0,
-    skew: 0.8
-  },
-  // 울먹임: 눈썹 팔자, 입 삐죽
-  teary: {
-    brow: 0.9,
-    browIn: 1.0,
-    lid: 0.35,
-    open: 0.35,
-    smile: -0.6,
-    width: -0.1,
-    pupil: 1.05,
-    pop: 1.04
-  },
-};
-for (const k in FACES) FACES[k] = Object.assign({}, FACE_DEF, FACES[k]);
-const SHOCK_FACES = new Set(['jawdrop', 'disbelief', 'gasp', 'awe', 'wow']);
+
 
 // 재질 (모든 사람 공용)
 const PEOPLE_MAT = {};
@@ -5726,7 +5418,7 @@ function slidePos(m) {
 
 function tbnNote(t, m, dur, v = 0.9, o = {}) {
   const s = nearestSample('B', m);
-  const vo = new SusVoice(s, m, t, AE.buses.tbn, {
+  const vo = new SusVoice(AE.ctx, s, m, t, AE.buses.tbn, {
     level: vel(v) * 0.9,
     fadeIn: o.fadeIn || 0.022,
     scoop: o.scoop != null ? o.scoop : (Math.random() < 0.22 ? -0.6 : 0),
@@ -7110,7 +6802,7 @@ function genFinal(S, b) {
   pianoNotes(t, [root + 12, ...PNO.voicing], 3.2, 0.6, 'L', 0.02);
   const tm = nearestPC(ch.root + QUAL[ch.q].tones[1], 60, 55, 67),
     s = nearestSample('B', tm);
-  const tv = new SusVoice(s, tm, t, AE.buses.tbn, {
+  const tv = new SusVoice(AE.ctx,s, tm, t, AE.buses.tbn, {
     level: vel(0.85),
     fadeIn: 0.03,
     offset: s.start + 0.01
@@ -7446,7 +7138,7 @@ function hornVoice(m, t, d, o = {}) {
   f.Q.value = 0.45;
   f.frequency.setValueAtTime(dynCut(d), Math.max(0, t - 0.002));
   const off = o.body ? s.start + 0.11 : o.offset != null ? o.offset : s.start;
-  const v = new SusVoice(s, m, t, o.dest || TP.in, {
+  const v = new SusVoice(AE.ctx, s, m, t, o.dest || TP.in, {
     level: dynGain(m, d),
     fadeIn: o.fadeIn || 0.005,
     offset: Math.min(off, s.ls != null ? s.ls - 0.05 : off),
@@ -9102,7 +8794,9 @@ function setupBand(scene) {
   const dr = new Person(BANDLOOKS.dr, {
     seated: true,
     seatY,
-    feetFwd: 0.5
+    feetFwd: 0.5,
+    mat: PEOPLE_MAT,
+    people: PEOPLE
   });
   dr.root.position.set(L.dr.pos[0], Y, L.dr.pos[2]);
   dr.root.rotation.y = L.dr.yaw;
@@ -9119,7 +8813,7 @@ function setupBand(scene) {
   }
   dr.kit = kit;
   // ----- 베이스 -----
-  const bs = new Person(BANDLOOKS.bs);
+  const bs = new Person(BANDLOOKS.bs, { mat: PEOPLE_MAT, people: PEOPLE });
   bs.root.position.set(L.bs.pos[0], Y, L.bs.pos[2]);
   bs.root.rotation.y = L.bs.yaw;
   scene.add(bs.root);
@@ -9140,14 +8834,16 @@ function setupBand(scene) {
   const pn = new Person(BANDLOOKS.pn, {
     seated: true,
     seatY: sp2.y - Y,
-    feetFwd: 0.38
+    feetFwd: 0.38,
+    mat: PEOPLE_MAT,
+    people: PEOPLE
   });
   pn.root.position.set(sp2.x, Y, sp2.z);
   pn.root.rotation.y = L.pn.yaw;
   scene.add(pn.root);
   pn.piano = piano;
   // ----- 트롬본 (리더) -----
-  const tb = new Person(BANDLOOKS.tb);
+  const tb = new Person(BANDLOOKS.tb, { mat: PEOPLE_MAT, people: PEOPLE });
   tb.root.position.set(L.tb.pos[0], Y, L.tb.pos[2]);
   tb.root.rotation.y = L.tb.yaw;
   scene.add(tb.root);
@@ -9538,8 +9234,7 @@ function tbMouthFrame(tb) {
   const hb = tb.bones[BONE.head];
   hb.updateWorldMatrix(true, false);
   const q = hb.getWorldQuaternion(new THREE.Quaternion());
-  const mouth = tb.mouthP,
-    p = V3(0, mouth.y, mouth.z + 0.02).applyMatrix4(hb.matrixWorld);
+  const mouth = tb.mouthP, p = V3(0, mouth.y, mouth.z + 0.02).applyMatrix4(hb.matrixWorld);
   return { p, q };
 }
 
@@ -9950,7 +9645,9 @@ function setupCrowd(scene) {
       seated: true,
       seatY: sp.seatY || 0.46,
       lod: far ? 2 : 1,
-      feetFwd: sp.kind === 'bar' ? 0.3 : 0.42
+      feetFwd: sp.kind === 'bar' ? 0.3 : 0.42,
+      mat: PEOPLE_MAT,
+      people: PEOPLE
     });
     p.root.position.copy(sp.pos);
     p.root.rotation.y = sp.yaw;
@@ -10025,7 +9722,7 @@ function setupCrowd(scene) {
       tie: '#ee4a2c',
       pants: '#22244a',
       h: 1.0
-    }, { lod: 1 });
+    }, { lod: 1, mat: PEOPLE_MAT, people: PEOPLE });
     bt.root.position.copy(V.bartender.pos);
     bt.root.rotation.y = V.bartender.yaw;
     scene.add(bt.root);
@@ -12618,9 +12315,7 @@ function windowPerson(i) {
   const sl = WINP.slots[i],
     look = randomLook(700 + i * 13);
   look.h = rand(0.98, 1.08);
-  const p = new Person(look, {
-    lod: 2
-  });
+  const p = new Person(look, { lod: 2, mat: PEOPLE_MAT, people: PEOPLE });
   p.root.position.set(sl.x, 0.34, sl.z);
   p.root.rotation.y = sl.yaw;
   p.mesh.castShadow = false; // 바깥 계단 위 (안쪽 사람들 머리 너머로 보이게)
@@ -12699,7 +12394,8 @@ function backPerson(i) {
   const [x, z] = BACKP.spots[i], look = randomLook(500 + (i + 1) * 17);
   const p = new Person(look, {
     seated: false,
-    lod: 2
+    lod: 2,
+    mat: PEOPLE_MAT, people: PEOPLE
   });
   p.root.position.set(x, 0, z);
   p.root.rotation.order = 'YXZ';
@@ -12838,7 +12534,7 @@ function spVoiceStart(t, m, lvl) {
   const hm = harmFor(m, t),
     s = nearestSample('T', hm);
   if (!s) return;
-  const v = new SusVoice(s, hm, t, SPX.pan, {
+  const v = new SusVoice(AE.ctx, s, hm, t, SPX.pan, {
     level: lvl * SP_LEVEL,
     fadeIn: 0.012,
     offset: s.start + 0.01,
@@ -12864,7 +12560,7 @@ function spVoiceMove(t, m, kind) {
   SPX.revoiceDue = !!s && s !== v.s;
   // 음정은 즉시 따라가고, 샘플 교체만 첫 번째 트럼펫과 같은 간격으로 제한.
   if (SPX.revoiceDue && t - SPX.lastRevoiceT >= (TP.mode === 'free' ? 0.1 : 0.08)) {
-    const nv = new SusVoice(s, hm, t, SPX.pan, {
+    const nv = new SusVoice(AE.ctx, s, hm, t, SPX.pan, {
       level: v.level,
       fadeIn: 0.02,
       offset: Math.min(s.start + 0.12, s.ls != null ? s.ls - 0.05 : 1),
@@ -13738,7 +13434,7 @@ function itlTick() {
   if (c.kind === 'intro') itlIntroTick(c);
 }
 // 무대에 올라온 팬 (매 프레임 자세)
-function itlFan(m, t, dt, beat) {
+function itlFan(m, t, dt) {
   const c = ITL.cur,
     p = m.p;
   if (!c || c.fan !== m) {
