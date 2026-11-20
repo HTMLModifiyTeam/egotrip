@@ -9,7 +9,9 @@ import { M4, V3 } from '../utils/Vector.js';
 import { shadeHex, mixHex } from '../utils/ColorUtils.js';
 
 // 좌/우 반복용 상수 (update 안에서 매 프레임 배열을 새로 만들지 않도록)
-const PERSON_SIDES = Object.freeze(['L', 'R']);
+export const PERSON_SIDES = Object.freeze(['L', 'R']);
+// 좌(+x) / 우(-x) 부호
+const sideSign = s => (s === 'L' ? 1 : -1);
 // 팔 상태 초기값 (좌·우 공통)
 const personArm = () => ({
   mode: 'rest',
@@ -37,8 +39,9 @@ const _pq1 = new THREE.Quaternion(), _pq2 = new THREE.Quaternion(), _pq3 = new T
 // 두 점 사이에 놓는 캡슐 행렬
 function capBetween(a, b, rad, seg = 12) {
   const d = _pv1.copy(b).sub(a), len = d.length();
-  const g = G.cap(len + rad * 0.0, rad, seg);
-  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.clone().normalize());
+  const g = G.cap(len, rad, seg);
+  const q = new THREE.Quaternion();
+  if (len > 1e-6) q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.divideScalar(len)); // 길이 0이면 회전 없음 (NaN 방지)
   const mid = a.clone().add(b).multiplyScalar(0.5);
   return { g, m: new THREE.Matrix4().compose(mid, q, new THREE.Vector3(1, 1, 1)) };
 }
@@ -205,7 +208,7 @@ export class Person {
     mk('cornerL', 5, [R * 0.3, my, mz - R * 0.04]);
     mk('cornerR', 5, [-R * 0.3, my, mz - R * 0.04]);
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1;
+      const sx = sideSign(s);
       mk('clav' + s, 3, [P.clav[0] * sx, P.clav[1], P.clav[2]]);
       mk('upper' + s, B.length - 1, [P.upper[0] * sx, P.upper[1], 0]);
       mk('fore' + s, B.length - 1, [0, -P.upperLen, 0]);
@@ -216,7 +219,7 @@ export class Person {
       mk('thumb' + s, hb, [-sx * 0.012, -P.handLen * 0.22, 0.032 * h]);
     }
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1;
+      const sx = sideSign(s);
       mk('thigh' + s, 1, [P.thigh[0] * sx, P.thigh[1], 0]);
       mk('shin' + s, B.length - 1, [0, -P.thighLen, 0]);
       mk('foot' + s, B.length - 1, [0, -P.shinLen, 0]);
@@ -240,6 +243,14 @@ export class Person {
   }
   // ----- 메시 -----
   buildMesh() {
+    try {
+      this.buildMeshImpl();
+    } finally {
+      G.capSeg = 6; // 도중에 예외가 나도 전역 설정을 되돌림
+    }
+  }
+
+  buildMeshImpl() {
     const L = this.look, h = this.h, w = this.w, R = this.R, rig = new Rig();
     // 멀리 있는 관객일수록 면 수를 줄임 (휴대폰 부담)
     const lo = this.lod,
@@ -360,32 +371,15 @@ export class Person {
     }
     // 허리 벨트 + 바지 엉덩이
     if (!isDress) {
-      rig.add(latheY([
-        [0.001, hipY - 0.13 * h],
-        [0.15 * w, hipY - 0.115 * h],
-        [0.168 * w, hipY - 0.05 * h],
-        [0.162 * w, hipY + 0.012 * h],
-        [0.001, hipY + 0.014 * h]
-      ], sseg).scale(1, 1, 0.78), pants, Bn.hips);
+      rig.add(latheY([[0.001, hipY - 0.13 * h], [0.15 * w, hipY - 0.115 * h], [0.168 * w, hipY - 0.05 * h], [0.162 * w, hipY + 0.012 * h], [0.001, hipY + 0.014 * h]], sseg).scale(1, 1, 0.78), pants, Bn.hips);
       rig.add(G.tor(1, 0.06, sseg, 6).rotateX(Math.PI / 2), L.belt || '#2a1e1a', Bn.hips, M4([0, hipY + 0.005 * h, 0], 0, [0.163 * w, 0.18, 0.163 * w * 0.78]));
     } else {
-      rig.add(latheY([
-        [0.001, hipY - 0.04 * h],
-        [0.17 * w, hipY - 0.03 * h],
-        [0.24 * w, hipY - 0.3 * h],
-        [0.27 * w, hipY - 0.42 * h],
-        [0.001, hipY - 0.425 * h]
-      ], sseg).scale(1, 1, 0.85), L.dress || top, Bn.hips);
+      rig.add(latheY([[0.001, hipY - 0.04 * h], [0.17 * w, hipY - 0.03 * h], [0.24 * w, hipY - 0.3 * h], [0.27 * w, hipY - 0.42 * h], [0.001, hipY - 0.425 * h]], sseg).scale(1, 1, 0.85), L.dress || top, Bn.hips);
     }
     // 목
     {
       const c = capBetween(V3(0, nkY - 0.04 * h, 0), V3(0, nkY + 0.1 * h, 0.01), 0.048 * w, seg);
-      rig.add(c.g, skin, p => p.y < nkY + 0.03 ? [
-        [Bn.neck, 1]
-      ] : [
-        [Bn.neck, 0.6],
-        [Bn.head, 0.4]
-      ], c.m);
+      rig.add(c.g, skin, p => p.y < nkY + 0.03 ? [[Bn.neck, 1]] : [ [Bn.neck, 0.6], [Bn.head, 0.4]], c.m);
     }
     // 옷깃
     if (style === 'shirt' || style === 'jacket' || style === 'blazer' || style === 'polo') rig.add(G.tor(1, 0.25, sseg, 6).rotateX(Math.PI / 2), L.shirt || (style === 'polo' ? top : '#fff4de'), Bn.chest, M4([0, nkY - 0.015 * h, 0.005], [0.12, 0, 0], [0.065 * w, 0.06 * w, 0.05]));
@@ -397,7 +391,7 @@ export class Person {
     // ----- 팔 -----
     const longSleeve = style === 'jacket' || style === 'blazer' || style === 'sweater' || style === 'hoodie' || style === 'shirt';
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1,
+      const sx = sideSign(s),
         iu = Bn['upper' + s],
         iff = Bn['fore' + s],
         ih = Bn['hand' + s];
@@ -498,7 +492,7 @@ export class Person {
     // ----- 눈 (얼굴 그룹) -----
     const E = this.eyeP;
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1,
+      const sx = sideSign(s),
         ie = Bn['eye' + s],
         il = Bn['lid' + s];
       const ec = V3(hw.x + sx * E.x, hw.y + E.y, hw.z + E.z);
@@ -511,8 +505,7 @@ export class Person {
       rig.add(lid, skin, il, M4([ec.x, ec.y, ec.z], 0, [E.r * 1.08, E.r * 1.2, E.r * 0.8]), 1);
       rig.add(G.tor(1, 0.08, 14, 5, Math.PI), L.lash || '#2a1a20', il, M4([ec.x, ec.y, ec.z], [Math.PI / 2, 0, 0], [E.r * 1.08 * (fem ? 1.04 : 1), E.r * 0.8, E.r * (fem ? 1.6 : 1.1)]), 1);
       // 눈썹
-      const ib = Bn['brow' + s],
-        bwp = this.restW[ib];
+      const ib = Bn['brow' + s], bwp = this.restW[ib];
       {
         const c = capBetween(V3(bwp.x - sx * R * 0.14, bwp.y - R * 0.01, bwp.z), V3(bwp.x + sx * R * 0.14, bwp.y + R * 0.015, bwp.z - R * 0.03), R * (L.browT || 0.05), 8);
         rig.add(c.g, L.browColor || hair, ib, c.m, 1);
@@ -545,10 +538,7 @@ export class Person {
       {
         const bp = bg.attributes.position;
         for (let i = 0; i < bp.count; i++) {
-          const x = bp.getX(i),
-            y = bp.getY(i),
-            z = bp.getZ(i),
-            rr = Math.hypot(x, z);
+          const x = bp.getX(i), y = bp.getY(i), z = bp.getZ(i), rr = Math.hypot(x, z);
           if (rr < 1e-4) continue;
           let a = Math.atan2(z, -x);
           if (a < ph0 - 0.01) a += Math.PI * 2;
@@ -900,12 +890,11 @@ export class Person {
 
   updateLegs(st, c) {
     const B = this.bones, Bn = BONE, h = this.h;
+    const kn = smooth01(this.s.kneel), sl = smooth01(this.s.slump);
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1;
+      const sx = sideSign(s);
       // 발 목표 (루트 기준): 앉음 = 의자 앞 바닥, 서 있음 = 엉덩이 아래
       const stepK = c.step ? Math.max(0, Math.sin(NOW.t * 6 + (s === 'L' ? 0 : Math.PI))) * 0.05 * c.step : 0;
-      const kn = smooth01(this.s.kneel),
-        sl = smooth01(this.s.slump);
       const fx = sx * lerp(0.13, 0.11, st) * this.w;
       let fz = lerp(this.feetFwd, 0.0, st);
       let fy = this.P.ankle + this.s.jumpY * (st > 0.8 ? 0.8 : 0) + stepK;
@@ -918,7 +907,7 @@ export class Person {
         fy = lerp(fy, 0.06 * h, sl);
       }
       const tgt = this.local(fx, fy, fz, _pv3);
-      const pole = this.local(fx * 1.1, this.restW[Bn.shinL].y + 0.3, 1.5, _pv4);
+      const pole = this.local(fx * 1.1, this.restW[Bn['shin' + s]].y + 0.3, 1.5, _pv4);
       this.ik2(Bn['thigh' + s], Bn['shin' + s], tgt, pole, this.P.thighLen, this.P.shinLen);
       // 발은 바닥과 평행 (정강이 행렬은 ik2가 방금 맞춰 둠)
       _pq2.setFromRotationMatrix(B[Bn['shin' + s]].matrixWorld).invert();
@@ -930,7 +919,7 @@ export class Person {
     const A = this.arms[side],
       B = this.bones,
       Bn = BONE,
-      sx = side === 'L' ? 1 : -1;
+      sx = sideSign(side);
     const iu = Bn['upper' + side], iff = Bn['fore' + side], ih = Bn['hand' + side];
     // 손 모양
     const hp = HAND_POSE[A.hand] || HAND_POSE.relax, hc = this.handCur[side];
@@ -1008,7 +997,7 @@ export class Person {
     const pop = clamp(f.pop, 0.9, 1.3);
     // 눈썹: 놀라면 이마 끝까지 치켜올라감, skew는 한쪽만
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1, b = B[Bn['brow' + s]], r0 = this.restW[Bn['brow' + s]];
+      const sx = sideSign(s), b = B[Bn['brow' + s]], r0 = this.restW[Bn['brow' + s]];
       const up = f.brow + sx * f.skew * 0.6, low = sx * f.skew < 0;
       b.position.set(r0.x - hw.x, r0.y - hw.y + up * R * 0.12 + (pop - 1) * R * 0.5, r0.z - hw.z + (pop - 1) * R * 0.12);
       b.rotation.set(0, 0, -sx * (f.browIn - (low ? Math.abs(f.skew) * 0.9 : 0)) * 0.3);
@@ -1051,7 +1040,7 @@ export class Person {
     mb.rotation.set(tilt - 0.1, 0, 0);
     mb.scale.set(1 + wd * 0.35, sy, 1);
     for (const s of PERSON_SIDES) {
-      const sx = s === 'L' ? 1 : -1, cb = B[Bn['corner' + s]];
+      const sx = sideSign(s), cb = B[Bn['corner' + s]];
       cb.position.set(sx * mp.w * (1 + wd * 0.45 - open * 0.07), cy + sm * R * 0.11, mp.z - R * 0.04 - drop * 0.12);
       cb.scale.set(1, 0.25 + open * 0.55, 1);
     }

@@ -1,5 +1,4 @@
 import { MathUtils } from "three";
-import { inSet } from './Harmony.js';
 
 export const rateFor = (s, midi, cents = 0) => Math.pow(2, (midi - s.m) / 12 + ((s.c || 0) + cents) / 1200);
 export const clamp = MathUtils.clamp;
@@ -11,22 +10,17 @@ export const dampAngle = (cur, target, rate, dt) => {
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
   return cur + d * (1 - Math.exp(-rate * dt));
-};
+}
 
 export const lerp = MathUtils.lerp;
 export const mod12 = x => ((x % 12) + 12) % 12;
 
-export function nearestAllowed(raw, ch, key, dir = 1) {
-  raw = Math.round(raw);
-  for (let d = 0; d <= 7; d++) {
-    const c = d === 0 ? [raw] : (dir >= 0 ? [raw + d, raw - d] : [raw - d, raw + d]);
-    for (const m of c) if (inSet(m, ch, key)) return m;
-  }
-  return raw;
+export const smooth01 = (t) => {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
 }
 
-export const smooth01 = t => {
-  t = clamp(t, 0, 1);
-  return t * t * (3 - 2 * t);
-};
-export const smoothstep = (a, b, x) => smooth01((x - a) / (b - a));
+export const smoothstep = (a, b, x) => {
+  if (a === b) return x < a ? 0 : 1;
+  return smooth01((x - a) / (b - a));
+}

@@ -1,13 +1,25 @@
+import { MathUtils } from "three";
+
 // 시드 고정 난수 (사람 외모가 매번 같게)
 export const pick = arr => arr[Math.floor(Math.random() * arr.length)];
-export const rand = (a = 0, b = 1) => a + Math.random() * (b - a);
-export const randi = (a, b) => Math.floor(rand(a, b + 1));
+export function wpick(opts) {
+  let s = 0;
+  for (const o of opts) s += o[1];
+  let r = Math.random() * s;
+  for (const o of opts) {
+    r -= o[1];
+    if (r <= 0) return o[0];
+  }
+  return opts[opts.length - 1][0];
+};
+
+export const rand = MathUtils.randFloat;
+export const randi = MathUtils.randInt;
 
 export function seeded(seed) {
   let s = seed >>> 0;
   const f = () => {
-    s += 0x6D2B79F5;
-    let t = s;
+    let t = s += 0x6D2B79F5;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
